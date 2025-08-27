@@ -1,5 +1,5 @@
 <template>
-  <HelloWorld />
+  This is an empty view.
 </template>
 
 <script setup>
