@@ -1,155 +1,132 @@
-// stores/app.js
 // Utilities
 import { defineStore } from 'pinia'
 
+const IDS_URL
+  = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?id[0:1:2464]'
+
+const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
+
 export const useAppStore = defineStore('app', {
   state: () => ({
+    // data fetch
     loading: false,
     error: null,
     rawText: '',
     fetchedAt: null,
+
+    // id list (transect numbers)
+    loadingIds: false,
+    idsError: null,
+    idList: [],
+    idsFetchedAt: null,
   }),
+
   actions: {
-    async fetchOpendapAscii (url) {
+    // --- Transect ID list (numbers) ---
+    async fetchTransectIdList () {
+      if (this.idList && this.idList.length > 0) {
+        return
+      }
+
+      // try localStorage cache first
+      const cached = localStorage.getItem(ID_LIST_CACHE_KEY)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          if (Array.isArray(obj.list) && obj.list.length > 0) {
+            this.idList = obj.list
+            this.idsFetchedAt = obj.when || null
+            return
+          }
+        } catch { /* ignore */ }
+      }
+
+      // fetch fresh
+      this.loadingIds = true
+      this.idsError = null
       try {
-        this.error = null
-        this.loading = true
-
-        // Fetch raw ASCII text directly from OpenDAP (frontend only).
-        const res = await fetch(url, { credentials: 'omit' })
+        const res = await fetch(IDS_URL, { cache: 'no-store' })
         if (!res.ok) {
-          throw new Error(`OpenDAP fetch failed: ${res.status} ${res.statusText}`)
+          throw new Error(`Failed to load transect catalog (${res.status})`)
         }
-
         const text = await res.text()
+        const list = this._parseIdList(text)
+        if (!list || list.length === 0) {
+          throw new Error('Could not parse transect catalog')
+        }
+        this.idList = list
+        this.idsFetchedAt = Date.now()
+        localStorage.setItem(ID_LIST_CACHE_KEY, JSON.stringify({ list, when: this.idsFetchedAt }))
+      } catch (error) {
+        this.idsError = error?.message || String(error)
+      } finally {
+        this.loadingIds = false
+      }
+    },
 
-        // Store in state
+    _parseIdList (ascii) {
+      // Find the line that starts with "id[" then parse all integers after it.
+      // The payload can be long and wrapped; we’ll just grab all numbers after the first "id[" occurrence.
+      const anchor = ascii.indexOf('id[')
+      const start = anchor === -1 ? 0 : ascii.indexOf('\n', anchor) + 1
+      const tail = ascii.slice(start)
+      const nums = tail.match(/-?\d+/g) || []
+      // Convert to integers
+      return nums.map(n => Number.parseInt(n, 10)).filter(Number.isFinite)
+    },
+
+    // --- OpenDAP data fetch & simple cache ---
+    async fetchOpendapAscii (url) {
+      if (!url) {
+        return
+      }
+      this.loading = true
+      this.error = null
+      try {
+        const res = await fetch(url, { cache: 'no-store' })
+        if (!res.ok) {
+          throw new Error(`Failed to fetch OpenDAP data (${res.status})`)
+        }
+        const text = await res.text()
         this.rawText = text
         this.fetchedAt = Date.now()
-
-        // Persist
-        const payload = {
-          sourceUrl: url,
-          fetchedAt: this.fetchedAt,
-          text,
-        }
-        await saveToStorage(url, payload)
+        // simple localStorage cache
+        localStorage.setItem(this._cacheKey(url), JSON.stringify({ t: this.fetchedAt, data: text }))
       } catch (error) {
-        this.error = error && error.message ? error.message : String(error)
+        this.error = error?.message || String(error)
       } finally {
         this.loading = false
       }
     },
 
     async loadFromCache (url) {
+      if (!url) {
+        return
+      }
       try {
-        this.error = null
-        this.loading = true
-        const cached = await loadFromStorage(url)
-        if (cached) {
-          this.rawText = cached.text || ''
-          this.fetchedAt = cached.fetchedAt || null
-        } else {
-          this.error = 'No cache found for this URL.'
+        const cache = localStorage.getItem(this._cacheKey(url))
+        if (!cache) {
+          this.error = 'No cached data for this URL.'
+          return
         }
-      } catch (error) {
-        this.error = error && error.message ? error.message : String(error)
-      } finally {
-        this.loading = false
+        const obj = JSON.parse(cache)
+        this.rawText = obj.data || ''
+        this.fetchedAt = obj.t || null
+        this.error = null
+      } catch {
+        this.error = 'Failed to load from cache.'
       }
     },
 
-    async clearCache (url) {
-      try {
-        await removeFromStorage(url)
-      } catch {
-        // ignore, UI clear is still ok
+    clearCache (url) {
+      if (!url) {
+        return
       }
-      // clear state too
-      this.rawText = ''
-      this.fetchedAt = null
-      this.error = null
+      localStorage.removeItem(this._cacheKey(url))
+    },
+
+    _cacheKey (url) {
+      return `opendap_cache::${url}`
     },
   },
 })
-
-/* ---------- Minimal IndexedDB (with localStorage fallback) ---------- */
-
-const KEY_PREFIX = 'opendap-cache:'
-
-function hasIndexedDB () {
-  try {
-    return typeof indexedDB !== 'undefined'
-  } catch {
-    return false
-  }
-}
-
-function dbOpen () {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open('opendap-db', 1)
-    req.onupgradeneeded = () => {
-      const db = req.result
-      if (!db.objectStoreNames.contains('kv')) {
-        db.createObjectStore('kv')
-      }
-    }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-function idbPut (key, value) {
-  return dbOpen().then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readwrite')
-    tx.objectStore('kv').put(value, key)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  }))
-}
-
-function idbGet (key) {
-  return dbOpen().then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readonly')
-    const req = tx.objectStore('kv').get(key)
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  }))
-}
-
-function idbDelete (key) {
-  return dbOpen().then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readwrite')
-    tx.objectStore('kv').delete(key)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  }))
-}
-
-async function saveToStorage (url, payload) {
-  const key = KEY_PREFIX + url
-  if (hasIndexedDB()) {
-    await idbPut(key, payload)
-  } else {
-    localStorage.setItem(key, JSON.stringify(payload))
-  }
-}
-
-async function loadFromStorage (url) {
-  const key = KEY_PREFIX + url
-  if (hasIndexedDB()) {
-    return await idbGet(key)
-  } else {
-    const v = localStorage.getItem(key)
-    return v ? JSON.parse(v) : null
-  }
-}
-
-async function removeFromStorage (url) {
-  const key = KEY_PREFIX + url
-  if (hasIndexedDB()) {
-    await idbDelete(key)
-  } else {
-    localStorage.removeItem(key)
-  }
-}

@@ -2,9 +2,9 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
 
 const routes = [
-  // optional numeric slug; default is handled inside Home.vue
-  { path: String.raw`/:transect(\d+)?`, name: 'Home', component: Home },
-  // legacy root redirect (optional)
+  // slug is the *transect number value*, not the index
+  { path: String.raw`/:transectNum(\d+)?`, name: 'Home', component: Home },
+  // ensure root works too
   { path: '/', redirect: { name: 'Home' } },
 ]
 
