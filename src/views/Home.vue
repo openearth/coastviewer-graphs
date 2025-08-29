@@ -61,10 +61,20 @@
         </div>
 
         <div v-if="chartReady" class="mb-1">
-          <v-alert type="success" variant="tonal">
+          <v-alert type="success" variant="tonal" class="mb-3">
             Parsed for chart ✓ — cross_shore: <strong>{{ crossShore.length.toLocaleString() }}</strong>,
             years: <strong>{{ years.length }}</strong>.
           </v-alert>
+
+          <!-- ECharts card -->
+          <v-card variant="tonal" class="pa-3 mb-3">
+            <div class="text-subtitle-1 mb-2">Cross-shore profiles by year</div>
+            <div ref="chartEl" class="chart-box"></div>
+            <div class="text-caption mt-2">
+              Tip: use the horizontal zoom to focus on a cross-shore range; toggle years via legend.
+            </div>
+          </v-card>
+
           <v-table class="mt-2">
             <thead>
               <tr>
@@ -88,9 +98,10 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
+import * as echarts from 'echarts'
 
 const DEFAULT_TRANSECT_NUMBER = 1000475
 
@@ -112,10 +123,27 @@ const idsError    = computed(() => store.idsError)
 const idList      = computed(() => store.idList)
 
 // derived for charts
-const chartReady   = computed(() => store.chartReady)
-const years        = computed(() => store.years)
-const crossShore   = computed(() => store.crossShore)
+const chartReady     = computed(() => store.chartReady)
+const years          = computed(() => store.years)
+const crossShore     = computed(() => store.crossShore)
 const altitudeByYear = computed(() => store.altitudeByYear)
+
+// If your store already provides `echartsSeries`, we’ll use it. Otherwise, build it locally.
+const echartsSeriesFromStore = computed(() => store.echartsSeries)
+const echartsSeries = computed(() => {
+  if (echartsSeriesFromStore.value && echartsSeriesFromStore.value.length) {
+    return echartsSeriesFromStore.value
+  }
+  // Fallback builder (x=cross_shore, y=altitude)
+  if (!years.value?.length || !crossShore.value?.length || !altitudeByYear.value?.length) return []
+  return years.value.map((yearLabel, tIndex) => ({
+    name: String(yearLabel),
+    type: 'line',
+    showSymbol: false,
+    connectNulls: false,
+    data: crossShore.value.map((x, xi) => [x, altitudeByYear.value?.[tIndex]?.[xi] ?? null]),
+  }))
+})
 
 const currentTransectNum = computed(() => {
   const raw = route.params.transectNum
@@ -177,10 +205,93 @@ function reload () {
   fetchNow()
 }
 
+/* --------------------- ECharts setup --------------------- */
+const chartEl = ref(null)
+let chartInstance = null
+let disposed = false
+
+function makeOption () {
+  return {
+    tooltip: { trigger: 'axis' },
+    toolbox: {
+      feature: {
+        saveAsImage: {},
+        dataZoom: {},
+        restore: {},
+      },
+      right: 10
+    },
+    grid: { left: 56, right: 24, top: 56, bottom: 64 },
+    legend: { type: 'scroll', top: 8 },
+    xAxis: {
+      type: 'value',
+      name: 'cross_shore',
+      nameLocation: 'middle',
+      nameGap: 28,
+      splitLine: { show: true }
+    },
+    yAxis: {
+      type: 'value',
+      name: 'altitude (m)',
+      nameLocation: 'middle',
+      nameGap: 40,
+      splitLine: { show: true }
+    },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0 },
+      { type: 'slider', xAxisIndex: 0, height: 18, bottom: 24 }
+    ],
+    series: echartsSeries.value ?? []
+  }
+}
+
+function ensureChart () {
+  if (disposed) return null
+  if (!chartEl.value) return null
+  if (!chartInstance) {
+    chartInstance = echarts.init(chartEl.value)
+  }
+  return chartInstance
+}
+
+function renderChart () {
+  if (disposed) return
+  // If no data or not ready yet, just clear any previous chart safely
+  if (!chartReady.value || !echartsSeries.value?.length) {
+    const inst = chartInstance
+    if (inst) inst.clear()
+    return
+  }
+  const inst = ensureChart()
+  if (!inst) return
+  inst.setOption(makeOption(), true)
+}
+
+function handleResize () {
+  if (disposed) return
+  if (chartInstance) chartInstance.resize()
+}
+
 onMounted(async () => {
   await store.fetchTransectIdList()
   if (!indexNotFound.value) {
     await fetchNow()
+  }
+
+  await nextTick()
+  if (chartEl.value && !chartInstance) {
+    chartInstance = echarts.init(chartEl.value)
+  }
+  renderChart()
+  window.addEventListener('resize', handleResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  disposed = true
+  if (chartInstance) {
+    try { chartInstance.dispose() } catch {}
+    chartInstance = null
   }
 })
 
@@ -192,9 +303,19 @@ watch(() => route.params.transectNum, async () => {
     await fetchNow()
   }
 })
+
+// Re-render when parsed data changes (defensive: will no-op until mounted)
+watch([chartReady, echartsSeries, crossShore, years], () => {
+  renderChart()
+})
 </script>
 
 <style scoped>
 .ga-2 { gap: 8px; }
 .flex-grow-1 { flex: 1; }
+/* ECharts container */
+.chart-box {
+  width: 100%;
+  height: 420px;
+}
 </style>

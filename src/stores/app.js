@@ -4,13 +4,11 @@ import { defineStore } from 'pinia'
 const IDS_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?id[0:1:2464]'
 
-const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
+// Bump the cache key to invalidate any previously cached bad list.
+const ID_LIST_CACHE_KEY = 'jarkus_id_list_v2'
 
 // cache only if the text is smaller than this many chars (~bytes)
 const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
-
-// --- Helper: tolerant number tokenizer (float, int, sci, NaN) ---
-const NUM_RE = /-?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][+-]?\d+)?|NaN/gi
 
 function stripOpendapIndices (block) {
   if (!block) {
@@ -60,7 +58,7 @@ function toYearLabels (timeVals) {
  * Robustly grab only the numeric payload that follows a header like:
  *   altitude[time = 60][alongshore = 1][cross_shore = 2463]
  *   cross_shore[2463]
- *   cross_shore [0:1:2462]
+ *   id[2465]
  *
  * IMPORTANT: OpenDAP .ascii has a preamble ("Dataset { ... }") and then
  * a dashed separator line. Only AFTER that line do the numeric payload
@@ -82,8 +80,7 @@ function capturePayloadBlock (asciiRaw, varName) {
     : ascii // fallback: no separator found; search whole text
 
   // 2) In the payload section, find the header line for this var
-  // accept things like: altitude.altitude[60][1][2463]
-  // and also possible namespaces like foo.bar.altitude[...]
+  // accept things like: foo.bar.id[...]
   const headerRe = new RegExp(
     String.raw`^\s*(?:[\w]+\.)*${varName}\s*(?:\[[^\n]*\]\s*)+\s*$`,
     'm',
@@ -97,7 +94,6 @@ function capturePayloadBlock (asciiRaw, varName) {
   const tail = searchBase.slice(start)
 
   // 3) Capture until the next payload header or EOF
-  // next header may also be dotted
   const nextHeaderRe = /^\s*[\w.]+\s*(?:\[[^\n]*\]\s*)+\s*$/m
   const n = nextHeaderRe.exec(tail)
   const end = n ? n.index : tail.length
@@ -106,9 +102,14 @@ function capturePayloadBlock (asciiRaw, varName) {
 }
 
 // --- Helper: build chart rows in requested format ---
-function buildChartData (crossShore, yearLabels, altitude2D) {
-  // yearLabels are already strings (e.g., "1992","1993",…)
-  const years = yearLabels.slice()
+function buildChartData (crossShore, times, altitude2D) {
+  // Years (string labels)
+  const years = times.map(t => {
+    if (t != null && Math.abs(t) >= 1500 && Math.abs(t) <= 3000) {
+      return String(Math.round(t))
+    }
+    return `t${Math.round(t ?? 0)}`
+  })
 
   // Compose rows: first row is cross_shore axis
   const rows = []
@@ -127,31 +128,6 @@ function buildChartData (crossShore, yearLabels, altitude2D) {
   }
 }
 
-// --- Helper: build ECharts-ready series [{name, type, data:[ [x,y], ... ]}, ...] ---
-function buildEchartsSeries (crossShore, years, altitude2D) {
-  const series = []
-  const X = crossShore.length
-  const T = years.length
-
-  for (let t = 0; t < T; t++) {
-    const row = altitude2D[t] || []
-    const points = new Array(X)
-    for (let x = 0; x < X; x++) {
-      // ECharts handles nulls as gaps
-      points[x] = [crossShore[x], row[x] ?? null]
-    }
-    series.push({
-      name: String(years[t]),
-      type: 'line',
-      data: points,
-      // Optional styling toggles you might want; comment out if not needed:
-      // showSymbol: false,
-      // connectNulls: false,
-    })
-  }
-  return series
-}
-
 // --- Parse full ASCII payload into arrays we need ---
 function parseOpendapAscii (ascii) {
   // Extract payload blocks by variable name (tolerant to spaces/CRLF)
@@ -164,9 +140,9 @@ function parseOpendapAscii (ascii) {
 
   const cross = tokenizeNumbers(crossBlock)
   const rawTime = tokenizeNumbers(timeBlock)
-  const timeLabels = toYearLabels(rawTime)
+  const time = toYearLabels(rawTime)
 
-  if (cross.length === 0 || timeLabels.length === 0) {
+  if (cross.length === 0 || time.length === 0) {
     const head = (ascii || '').slice(0, 500)
     throw new Error(
       'Could not parse cross_shore/time arrays from payload. '
@@ -177,7 +153,7 @@ function parseOpendapAscii (ascii) {
 
   // altitude is a flat list; we reshape to [time.length][cross.length]
   const flatAlt = tokenizeNumbers(cleanAltBlock)
-  const T = timeLabels.length
+  const T = time.length
   const X = cross.length
 
   for (let i = 0; i < flatAlt.length; i++) {
@@ -245,11 +221,7 @@ function parseOpendapAscii (ascii) {
     }
   }
 
-  // Build both the table-style export and the ECharts series
-  const base = buildChartData(cross, timeLabels, altitude2D)
-  const echartsSeries = buildEchartsSeries(cross, base.years, base.altitudeByYear)
-
-  return { ...base, echartsSeries }
+  return buildChartData(cross, time, altitude2D)
 }
 
 export const useAppStore = defineStore('app', {
@@ -267,7 +239,6 @@ export const useAppStore = defineStore('app', {
     years: [], // e.g., ["2010","2011",...]
     crossShore: [], // number[]
     altitudeByYear: [], // number[][] with nulls preserved
-    echartsSeries: [], // [{ name, type:'line', data: [ [x,y], ... ] }, ...]
 
     // id list (transect numbers)
     loadingIds: false,
@@ -291,7 +262,12 @@ export const useAppStore = defineStore('app', {
         try {
           const obj = JSON.parse(cached)
           if (Array.isArray(obj.list) && obj.list.length > 0) {
-            this.idList = obj.list
+            // Safety: strip any stray leading 2465 from older caches.
+            let list = obj.list
+            if (list[0] === 2465) {
+              list = list.slice(1)
+            }
+            this.idList = list
             this.idsFetchedAt = obj.when || null
             return
           }
@@ -320,12 +296,27 @@ export const useAppStore = defineStore('app', {
       }
     },
 
+    // Only parse numbers from the payload section after the dashed line
+    // and after the 'id[...]' header, ignoring the preamble dimension (2465).
     _parseIdList (ascii) {
-      const anchor = ascii.indexOf('id[')
-      const start = anchor === -1 ? 0 : ascii.indexOf('\n', anchor) + 1
-      const tail = (ascii || '').slice(start)
-      const nums = tail.match(/-?\d+/g) || []
-      return nums.map(n => Number.parseInt(n, 10)).filter(Number.isFinite)
+      // Preferred robust path
+      let payload = capturePayloadBlock(ascii, 'id')
+      let nums = tokenizeNumbers(stripOpendapIndices(payload))
+
+      // Fallback: very defensive in case server formatting changes
+      if (!nums || nums.length === 0) {
+        const anchor = ascii.indexOf('id[')
+        const start = anchor === -1 ? 0 : ascii.indexOf('\n', anchor) + 1
+        const tail = (ascii || '').slice(start)
+        nums = (tail.match(/-?\d+/g) || []).map(n => Number.parseInt(n, 10))
+      }
+
+      // Sanity: if a stray dimension value 2465 slipped in as first item, drop it.
+      if (nums.length > 0 && nums[0] === 2465) {
+        nums = nums.slice(1)
+      }
+
+      return nums.filter(Number.isFinite)
     },
 
     // --- OpenDAP data fetch & cautious cache + parsing to chart format ---
@@ -333,6 +324,7 @@ export const useAppStore = defineStore('app', {
       if (!url) {
         return
       }
+
       // Cancel any in-flight request
       if (this._aborter) {
         try {
@@ -349,7 +341,6 @@ export const useAppStore = defineStore('app', {
       this.years = []
       this.crossShore = []
       this.altitudeByYear = []
-      this.echartsSeries = []
       try {
         const res = await fetch(url, { cache: 'no-store', signal: this._aborter.signal })
         if (!res.ok) {
@@ -359,13 +350,12 @@ export const useAppStore = defineStore('app', {
         this.rawText = text
         this.fetchedAt = Date.now()
 
-        // Parse immediately to target format (both table + echarts series)
+        // Parse immediately to target format
         const parsed = parseOpendapAscii(text)
         this.chartData = parsed.chartData
         this.years = parsed.years
         this.crossShore = parsed.crossShore
         this.altitudeByYear = parsed.altitudeByYear
-        this.echartsSeries = parsed.echartsSeries
         this.chartReady = true
 
         // Try to cache only if reasonably small
@@ -379,9 +369,7 @@ export const useAppStore = defineStore('app', {
           this.warning = 'Data fetched and parsed, but skipped local caching due to size.'
         }
       } catch (error) {
-        if (error?.name === 'AbortError') {
-          // Silent abort
-        } else {
+        if (error?.name !== 'AbortError') {
           this.error = error?.message || String(error)
         }
       } finally {
@@ -406,13 +394,12 @@ export const useAppStore = defineStore('app', {
         this.error = null
         this.warning = null
 
-        // also parse cached text to chartData + echartsSeries
+        // also parse cached text to chartData
         const parsed = parseOpendapAscii(text)
         this.chartData = parsed.chartData
         this.years = parsed.years
         this.crossShore = parsed.crossShore
         this.altitudeByYear = parsed.altitudeByYear
-        this.echartsSeries = parsed.echartsSeries
         this.chartReady = true
       } catch (error) {
         this.error = error?.message || 'Failed to load/parse cache.'
