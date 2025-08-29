@@ -22,19 +22,39 @@ function stripOpendapIndices (block) {
   return block.replace(/(^|\n)\s*(?:\[\d+\]){1,4},\s*/g, '$1')
 }
 
-function tokenizeNumbers (text) {
-  const out = []
-  let m
-  while ((m = NUM_RE.exec(text)) !== null) {
-    const token = m[0]
-    if (token === 'NaN') {
-      out.push(null)
-    } else {
-      const v = Number(token)
-      out.push(Number.isFinite(v) ? v : null)
-    }
+function tokenizeNumbers (block) {
+  if (!block) {
+    return []
   }
-  return out
+  // Grab only numeric tokens: optional sign, decimals, and exponent part.
+  const matches = block.match(/[-+]?(?:\d+\.\d+|\d+\.|\.\d+|\d+)(?:[eE][-+]?\d+)?/g)
+  if (!matches) {
+    return []
+  }
+  return matches.map(Number)
+}
+
+function toYearLabels (timeVals) {
+  if (!Array.isArray(timeVals) || timeVals.length === 0) {
+    return []
+  }
+
+  const min = Math.min(...timeVals)
+  const max = Math.max(...timeVals)
+
+  // Heuristic: if the data already looks like calendar years, keep as-is
+  if (min >= 1800 && max <= 2100) {
+    return timeVals.map(v => String(Math.trunc(v)))
+  }
+
+  // Otherwise assume "days since 1970-01-01 00:00:00"
+  const MS_PER_DAY = 86_400_000
+  const epoch = Date.UTC(1970, 0, 1)
+
+  return timeVals.map(d => {
+    const t = new Date(epoch + d * MS_PER_DAY)
+    return String(t.getUTCFullYear())
+  })
 }
 
 /**
@@ -124,7 +144,8 @@ function parseOpendapAscii (ascii) {
   const cleanAltBlock = stripOpendapIndices(altBlock)
 
   const cross = tokenizeNumbers(crossBlock)
-  const time = tokenizeNumbers(timeBlock)
+  const rawTime = tokenizeNumbers(timeBlock)
+  const time = toYearLabels(rawTime)
 
   if (cross.length === 0 || time.length === 0) {
     const head = (ascii || '').slice(0, 500)
