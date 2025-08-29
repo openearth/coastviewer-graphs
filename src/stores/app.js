@@ -1,4 +1,3 @@
-// stores/app.js
 // Utilities
 import { defineStore } from 'pinia'
 
@@ -107,14 +106,9 @@ function capturePayloadBlock (asciiRaw, varName) {
 }
 
 // --- Helper: build chart rows in requested format ---
-function buildChartData (crossShore, times, altitude2D) {
-  // Years (string labels)
-  const years = times.map(t => {
-    if (t != null && Math.abs(t) >= 1500 && Math.abs(t) <= 3000) {
-      return String(Math.round(t))
-    }
-    return `t${Math.round(t ?? 0)}`
-  })
+function buildChartData (crossShore, yearLabels, altitude2D) {
+  // yearLabels are already strings (e.g., "1992","1993",…)
+  const years = yearLabels.slice()
 
   // Compose rows: first row is cross_shore axis
   const rows = []
@@ -133,6 +127,31 @@ function buildChartData (crossShore, times, altitude2D) {
   }
 }
 
+// --- Helper: build ECharts-ready series [{name, type, data:[ [x,y], ... ]}, ...] ---
+function buildEchartsSeries (crossShore, years, altitude2D) {
+  const series = []
+  const X = crossShore.length
+  const T = years.length
+
+  for (let t = 0; t < T; t++) {
+    const row = altitude2D[t] || []
+    const points = new Array(X)
+    for (let x = 0; x < X; x++) {
+      // ECharts handles nulls as gaps
+      points[x] = [crossShore[x], row[x] ?? null]
+    }
+    series.push({
+      name: String(years[t]),
+      type: 'line',
+      data: points,
+      // Optional styling toggles you might want; comment out if not needed:
+      // showSymbol: false,
+      // connectNulls: false,
+    })
+  }
+  return series
+}
+
 // --- Parse full ASCII payload into arrays we need ---
 function parseOpendapAscii (ascii) {
   // Extract payload blocks by variable name (tolerant to spaces/CRLF)
@@ -145,9 +164,9 @@ function parseOpendapAscii (ascii) {
 
   const cross = tokenizeNumbers(crossBlock)
   const rawTime = tokenizeNumbers(timeBlock)
-  const time = toYearLabels(rawTime)
+  const timeLabels = toYearLabels(rawTime)
 
-  if (cross.length === 0 || time.length === 0) {
+  if (cross.length === 0 || timeLabels.length === 0) {
     const head = (ascii || '').slice(0, 500)
     throw new Error(
       'Could not parse cross_shore/time arrays from payload. '
@@ -158,11 +177,11 @@ function parseOpendapAscii (ascii) {
 
   // altitude is a flat list; we reshape to [time.length][cross.length]
   const flatAlt = tokenizeNumbers(cleanAltBlock)
-  const T = time.length
+  const T = timeLabels.length
   const X = cross.length
 
   for (let i = 0; i < flatAlt.length; i++) {
-    if (flatAlt[i] === -9999 || flatAlt[i] === -9999) {
+    if (flatAlt[i] === -9999) {
       flatAlt[i] = null
     }
   }
@@ -190,11 +209,10 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
-
       break
     }
     case X * T: {
-    // Some servers may emit the other order; try transpose
+      // Some servers may emit the other order; try transpose
       altitude2D = new Array(T)
       for (let t = 0; t < T; t++) {
         const row = new Array(X)
@@ -203,11 +221,10 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
-
       break
     }
     case T * 1 * X: {
-    // Safety: if alongshore dimension leaked into the flat stream
+      // Safety: if alongshore dimension leaked into the flat stream
       altitude2D = new Array(T)
       let p = 0
       for (let t = 0; t < T; t++) {
@@ -219,7 +236,6 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
-
       break
     }
     default: {
@@ -229,7 +245,11 @@ function parseOpendapAscii (ascii) {
     }
   }
 
-  return buildChartData(cross, time, altitude2D)
+  // Build both the table-style export and the ECharts series
+  const base = buildChartData(cross, timeLabels, altitude2D)
+  const echartsSeries = buildEchartsSeries(cross, base.years, base.altitudeByYear)
+
+  return { ...base, echartsSeries }
 }
 
 export const useAppStore = defineStore('app', {
@@ -247,6 +267,7 @@ export const useAppStore = defineStore('app', {
     years: [], // e.g., ["2010","2011",...]
     crossShore: [], // number[]
     altitudeByYear: [], // number[][] with nulls preserved
+    echartsSeries: [], // [{ name, type:'line', data: [ [x,y], ... ] }, ...]
 
     // id list (transect numbers)
     loadingIds: false,
@@ -328,6 +349,7 @@ export const useAppStore = defineStore('app', {
       this.years = []
       this.crossShore = []
       this.altitudeByYear = []
+      this.echartsSeries = []
       try {
         const res = await fetch(url, { cache: 'no-store', signal: this._aborter.signal })
         if (!res.ok) {
@@ -337,12 +359,13 @@ export const useAppStore = defineStore('app', {
         this.rawText = text
         this.fetchedAt = Date.now()
 
-        // Parse immediately to target format
+        // Parse immediately to target format (both table + echarts series)
         const parsed = parseOpendapAscii(text)
         this.chartData = parsed.chartData
         this.years = parsed.years
         this.crossShore = parsed.crossShore
         this.altitudeByYear = parsed.altitudeByYear
+        this.echartsSeries = parsed.echartsSeries
         this.chartReady = true
 
         // Try to cache only if reasonably small
@@ -383,12 +406,13 @@ export const useAppStore = defineStore('app', {
         this.error = null
         this.warning = null
 
-        // also parse cached text to chartData
+        // also parse cached text to chartData + echartsSeries
         const parsed = parseOpendapAscii(text)
         this.chartData = parsed.chartData
         this.years = parsed.years
         this.crossShore = parsed.crossShore
         this.altitudeByYear = parsed.altitudeByYear
+        this.echartsSeries = parsed.echartsSeries
         this.chartReady = true
       } catch (error) {
         this.error = error?.message || 'Failed to load/parse cache.'
