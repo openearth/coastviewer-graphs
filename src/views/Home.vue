@@ -46,10 +46,7 @@ async function fetchNow () {
   await store.fetchOpendapAscii(url.value)
 }
 
-/* -------------------- Jet colormap utility --------------------
-   Returns an array of CSS rgb() strings, smoothly spanning the
-   classic “jet” palette (red → … → blue) due to reversed t.
----------------------------------------------------------------- */
+/* -------------------- Jet colormap utility -------------------- */
 function createJetColormap (n) {
   if (!Number.isFinite(n) || n <= 0) return []
   if (n === 1) return ['rgb(0,0,131)'] // arbitrary single color
@@ -104,7 +101,20 @@ function computeXAxisBounds () {
   return { min: Math.min(...used), max: Math.max(...used) }
 }
 
-function buildSeries () {
+// Find the cross_shore position to mark (closest to 0)
+function computeRspX () {
+  const xs = crossShore.value || []
+  if (!xs.length) return null
+  let closest = xs[0]
+  let best = Math.abs(xs[0])
+  for (let i = 1; i < xs.length; i++) {
+    const d = Math.abs(xs[i])
+    if (d < best) { best = d; closest = xs[i] }
+  }
+  return closest
+}
+
+function buildSeries (rspX) {
   const ys = years.value || []
   const xs = crossShore.value || []
   const byYear = altitudeByYear.value || []
@@ -113,22 +123,39 @@ function buildSeries () {
   return ys.map((label, tIndex) => {
     const row = byYear[tIndex] || []
     const points = xs.map((x, i) => (row[i] == null ? [x, null] : [x, row[i]]))
-    return {
+
+    // Attach the vertical markLine to the first series so it spans the chart
+    const seriesObj = {
       name: label,
       type: 'line',
       showSymbol: false,
-      connectNulls: true, // keep your setting
+      connectNulls: true,
       data: points,
     }
+
+    if (tIndex === 0 && rspX != null && Number.isFinite(rspX)) {
+      seriesObj.markLine = {
+        symbol: 'none',
+        lineStyle: { color: '#000', width: 1.5, type: 'dashed' },
+        label: {
+          formatter: '{b}',
+          position: 'insideEndTop'
+        },
+        data: [{
+          name: 'RSP Lijn',
+          xAxis: rspX,               // numeric x-axis value (meters)
+          itemStyle: { color: '#000' }
+        }]
+      }
+    }
+    return seriesObj
   })
 }
 
 // Helper to extract x/y robustly from tooltip param
 function getXY (p) {
-  // For cartesian2d with data as [x, y], p.value is usually [x, y]
   if (Array.isArray(p?.value)) return { x: p.value[0], y: p.value[1] }
   if (Array.isArray(p?.data))  return { x: p.data[0],  y: p.data[1]  }
-  // Fallbacks
   return { x: p?.axisValue, y: p?.value }
 }
 
@@ -141,7 +168,8 @@ function renderChart () {
     }
 
     const { min: xMin, max: xMax } = computeXAxisBounds()
-    const series = buildSeries()
+    const rspX = computeRspX()
+    const series = buildSeries(rspX)
     const palette = createJetColormap(series.length)
 
     const option = {
@@ -159,28 +187,22 @@ function renderChart () {
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'line' },
-        // Show only series that actually have a value at the hovered x
         formatter: (params) => {
           const arr = Array.isArray(params) ? params : [params]
           const valid = arr.filter(p => {
             const { y } = getXY(p)
             return y != null && Number.isFinite(Number(y))
           })
-          if (valid.length === 0) return '' // show nothing if no values here
-
-          // Display the hovered cross_shore value once
+          if (valid.length === 0) return ''
           const { x } = getXY(valid[0])
           const header = `cross_shore: ${x}`
-
           const lines = valid.map(p => {
             const { y } = getXY(p)
             const marker = p.marker || ''
             return `${marker}${p.seriesName}: ${y}`
           })
-
           return [header, ...lines].join('<br/>')
         },
-        // Keep tooltip from listing empty series when axisPointer moves quickly
         showDelay: 0,
         hideDelay: 50,
         confine: true,
@@ -192,7 +214,7 @@ function renderChart () {
       },
       grid: { top: 142, right: 42, bottom: 96, left: 56 },
       xAxis: {
-        type: 'value',
+        type: 'value',                 // numeric axis
         name: 'cross_shore (m)',
         nameLocation: 'middle',
         nameGap: 32,
