@@ -48,31 +48,25 @@ async function fetchNow () {
 
 /* -------------------- Jet colormap utility --------------------
    Returns an array of CSS rgb() strings, smoothly spanning the
-   classic “jet” palette (blue → cyan → yellow → red).
+   classic “jet” palette (red → … → blue) due to reversed t.
 ---------------------------------------------------------------- */
 function createJetColormap (n) {
   if (!Number.isFinite(n) || n <= 0) return []
   if (n === 1) return ['rgb(0,0,131)'] // arbitrary single color
 
-  // Helper: piecewise jet RGB for t in [0,1]
   function jetRGB (t) {
-    // clamp
     t = Math.max(0, Math.min(1, t))
-    // This is a compact jet approximation
     const r = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 3)))
     const g = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 2)))
     const b = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 1)))
-    // Slight gamma to soften extremes
     const gamma = 0.9
     const to255 = (x) => Math.round(255 * Math.pow(x, gamma))
     return `rgb(${to255(r)},${to255(g)},${to255(b)})`
   }
 
-  // We want the first series to be at the cool end and progress warm.
-  // Spread samples across [0,1].
   const colors = []
   for (let i = 0; i < n; i++) {
-    const t = n === 1 ? 0.5 : 1 - i / (n - 1)
+    const t = n === 1 ? 0.5 : 1 - i / (n - 1) // reversed: red → blue
     colors.push(jetRGB(t))
   }
   return colors
@@ -129,6 +123,15 @@ function buildSeries () {
   })
 }
 
+// Helper to extract x/y robustly from tooltip param
+function getXY (p) {
+  // For cartesian2d with data as [x, y], p.value is usually [x, y]
+  if (Array.isArray(p?.value)) return { x: p.value[0], y: p.value[1] }
+  if (Array.isArray(p?.data))  return { x: p.data[0],  y: p.data[1]  }
+  // Fallbacks
+  return { x: p?.axisValue, y: p?.value }
+}
+
 function renderChart () {
   try {
     if (!chartRef.value) return
@@ -143,7 +146,6 @@ function renderChart () {
 
     const option = {
       animation: true,
-      // The color palette to use for series, in order:
       color: palette,
       title: {
         text: `Transect ${currentTransectNum.value}`,
@@ -156,15 +158,36 @@ function renderChart () {
       },
       tooltip: {
         trigger: 'axis',
-        valueFormatter: (val) => (val == null ? '—' : String(val)),
+        axisPointer: { type: 'line' },
+        // Show only series that actually have a value at the hovered x
+        formatter: (params) => {
+          const arr = Array.isArray(params) ? params : [params]
+          const valid = arr.filter(p => {
+            const { y } = getXY(p)
+            return y != null && Number.isFinite(Number(y))
+          })
+          if (valid.length === 0) return '' // show nothing if no values here
+
+          // Display the hovered cross_shore value once
+          const { x } = getXY(valid[0])
+          const header = `cross_shore: ${x}`
+
+          const lines = valid.map(p => {
+            const { y } = getXY(p)
+            const marker = p.marker || ''
+            return `${marker}${p.seriesName}: ${y}`
+          })
+
+          return [header, ...lines].join('<br/>')
+        },
+        // Keep tooltip from listing empty series when axisPointer moves quickly
+        showDelay: 0,
+        hideDelay: 50,
+        confine: true,
       },
       legend: {
         top: 56,
-        selector: [
-          {
-            title: 'All'
-          },
-        ],
+        selector: [{ title: 'All' }],
         selectorPosition: 'start',
       },
       grid: { top: 142, right: 42, bottom: 96, left: 56 },
