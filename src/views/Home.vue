@@ -140,7 +140,7 @@ const echartsSeries = computed(() => {
     name: String(yearLabel),
     type: 'line',
     showSymbol: false,
-    connectNulls: false,
+    connectNulls: true,
     data: crossShore.value.map((x, xi) => [x, altitudeByYear.value?.[tIndex]?.[xi] ?? null]),
   }))
 })
