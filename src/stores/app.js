@@ -4,11 +4,17 @@ import { defineStore } from 'pinia'
 const IDS_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?id[0:1:2464]'
 
-// Bump the cache key to invalidate any previously cached bad list.
-const ID_LIST_CACHE_KEY = 'jarkus_id_list_v2'
+const ALONGSHORE_URL
+  = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?alongshore[0:1:2464]'
+
+const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
+const ALONGSHORE_CACHE_KEY = 'jarkus_alongshore_list_v1'
 
 // cache only if the text is smaller than this many chars (~bytes)
 const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
+
+// --- Helper: tolerant number tokenizer (float, int, sci, NaN) ---
+const NUM_RE = /-?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][+-]?\d+)?|NaN/gi
 
 function stripOpendapIndices (block) {
   if (!block) {
@@ -58,7 +64,7 @@ function toYearLabels (timeVals) {
  * Robustly grab only the numeric payload that follows a header like:
  *   altitude[time = 60][alongshore = 1][cross_shore = 2463]
  *   cross_shore[2463]
- *   id[2465]
+ *   cross_shore [0:1:2462]
  *
  * IMPORTANT: OpenDAP .ascii has a preamble ("Dataset { ... }") and then
  * a dashed separator line. Only AFTER that line do the numeric payload
@@ -80,7 +86,8 @@ function capturePayloadBlock (asciiRaw, varName) {
     : ascii // fallback: no separator found; search whole text
 
   // 2) In the payload section, find the header line for this var
-  // accept things like: foo.bar.id[...]
+  // accept things like: altitude.altitude[60][1][2463]
+  // and also possible namespaces like foo.bar.altitude[...]
   const headerRe = new RegExp(
     String.raw`^\s*(?:[\w]+\.)*${varName}\s*(?:\[[^\n]*\]\s*)+\s*$`,
     'm',
@@ -94,6 +101,7 @@ function capturePayloadBlock (asciiRaw, varName) {
   const tail = searchBase.slice(start)
 
   // 3) Capture until the next payload header or EOF
+  // next header may also be dotted
   const nextHeaderRe = /^\s*[\w.]+\s*(?:\[[^\n]*\]\s*)+\s*$/m
   const n = nextHeaderRe.exec(tail)
   const end = n ? n.index : tail.length
@@ -157,7 +165,7 @@ function parseOpendapAscii (ascii) {
   const X = cross.length
 
   for (let i = 0; i < flatAlt.length; i++) {
-    if (flatAlt[i] === -9999) {
+    if (flatAlt[i] === -9999 || flatAlt[i] === -9999) {
       flatAlt[i] = null
     }
   }
@@ -185,6 +193,7 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
+
       break
     }
     case X * T: {
@@ -197,6 +206,7 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
+
       break
     }
     case T * 1 * X: {
@@ -212,6 +222,7 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
+
       break
     }
     default: {
@@ -246,6 +257,12 @@ export const useAppStore = defineStore('app', {
     idList: [],
     idsFetchedAt: null,
 
+    // alongshore list (value per alongshore index)
+    loadingAlongshore: false,
+    alongshoreError: null,
+    alongshoreList: [],
+    alongshoreFetchedAt: null,
+
     // fetch cancellation
     _aborter: null,
   }),
@@ -262,12 +279,7 @@ export const useAppStore = defineStore('app', {
         try {
           const obj = JSON.parse(cached)
           if (Array.isArray(obj.list) && obj.list.length > 0) {
-            // Safety: strip any stray leading 2465 from older caches.
-            let list = obj.list
-            if (list[0] === 2465) {
-              list = list.slice(1)
-            }
-            this.idList = list
+            this.idList = obj.list
             this.idsFetchedAt = obj.when || null
             return
           }
@@ -296,26 +308,61 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // Only parse numbers from the payload section after the dashed line
+    // FIX: only parse numbers from the payload section after the dashed line
     // and after the 'id[...]' header, ignoring the preamble dimension (2465).
     _parseIdList (ascii) {
-      // Preferred robust path
-      let payload = capturePayloadBlock(ascii, 'id')
-      let nums = tokenizeNumbers(stripOpendapIndices(payload))
+      const payload = capturePayloadBlock(ascii, 'id')
+      const clean = stripOpendapIndices(payload)
+      const nums = tokenizeNumbers(clean)
+      // They are Int32 IDs; coerce to integers and return.
+      return nums.map(n => Number.parseInt(String(n), 10)).filter(Number.isFinite)
+    },
 
-      // Fallback: very defensive in case server formatting changes
-      if (!nums || nums.length === 0) {
-        const anchor = ascii.indexOf('id[')
-        const start = anchor === -1 ? 0 : ascii.indexOf('\n', anchor) + 1
-        const tail = (ascii || '').slice(start)
-        nums = (tail.match(/-?\d+/g) || []).map(n => Number.parseInt(n, 10))
+    // --- Alongshore list (floats) ---
+    async fetchAlongshoreList () {
+      if (this.alongshoreList && this.alongshoreList.length > 0) {
+        return
       }
 
-      // Sanity: if a stray dimension value 2465 slipped in as first item, drop it.
-      if (nums.length > 0 && nums[0] === 2465) {
-        nums = nums.slice(1)
+      const cached = localStorage.getItem(ALONGSHORE_CACHE_KEY)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          if (Array.isArray(obj.list) && obj.list.length > 0) {
+            this.alongshoreList = obj.list
+            this.alongshoreFetchedAt = obj.when || null
+            return
+          }
+        } catch { /* ignore */ }
       }
 
+      this.loadingAlongshore = true
+      this.alongshoreError = null
+      try {
+        const res = await fetch(ALONGSHORE_URL, { cache: 'no-store' })
+        if (!res.ok) {
+          throw new Error(`Failed to load alongshore list (${res.status})`)
+        }
+        const text = await res.text()
+        const list = this._parseAlongshoreList(text)
+        if (!list || list.length === 0) {
+          throw new Error('Could not parse alongshore list')
+        }
+        this.alongshoreList = list
+        this.alongshoreFetchedAt = Date.now()
+        localStorage.setItem(ALONGSHORE_CACHE_KEY, JSON.stringify({ list, when: this.alongshoreFetchedAt }))
+      } catch (error) {
+        this.alongshoreError = error?.message || String(error)
+      } finally {
+        this.loadingAlongshore = false
+      }
+    },
+
+    _parseAlongshoreList (ascii) {
+      const payload = capturePayloadBlock(ascii, 'alongshore')
+      const clean = stripOpendapIndices(payload)
+      const nums = tokenizeNumbers(clean)
+      // alongshore is numeric (likely meters or an index mapping); keep as Number
       return nums.filter(Number.isFinite)
     },
 
@@ -324,7 +371,6 @@ export const useAppStore = defineStore('app', {
       if (!url) {
         return
       }
-
       // Cancel any in-flight request
       if (this._aborter) {
         try {
@@ -369,7 +415,9 @@ export const useAppStore = defineStore('app', {
           this.warning = 'Data fetched and parsed, but skipped local caching due to size.'
         }
       } catch (error) {
-        if (error?.name !== 'AbortError') {
+        if (error?.name === 'AbortError') {
+          // Silent abort
+        } else {
           this.error = error?.message || String(error)
         }
       } finally {

@@ -220,10 +220,10 @@ function renderChart () {
       },
       grid: {
         top: 142,
-        right: 72,          // a bit more breathing room on the right
+        right: 72,
         bottom: 96,
-        left: 72,           // and on the left
-        containLabel: true, // keep axis labels fully visible
+        left: 72,
+        containLabel: true,
       },
       xAxis: {
         type: 'value',
@@ -260,7 +260,10 @@ function handleResize () {
 }
 
 onMounted(async () => {
+  // Ensure catalogs needed by both the chart and the side panel are present
   await store.fetchTransectIdList()
+  await store.fetchAlongshoreList()
+
   if (!indexNotFound.value) {
     await fetchNow()
   }
@@ -283,6 +286,9 @@ watch(() => route.params.transectNum, async () => {
   if (!store.idList?.length) {
     await store.fetchTransectIdList()
   }
+  if (!store.alongshoreList?.length) {
+    await store.fetchAlongshoreList()
+  }
   if (!indexNotFound.value) {
     await fetchNow()
   }
@@ -302,9 +308,7 @@ watch(() => route.params.transectNum, async () => {
 .chart-wrap {
   flex: 1;
   min-width: 0;
-  /* add gentle horizontal padding so the chart isn't flush to the edges */
   padding: 0 24px;
-  /* allow tooltips / axes to render without clipping */
   overflow: visible;
 }
 
