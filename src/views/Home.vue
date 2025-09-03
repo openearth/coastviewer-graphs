@@ -1,6 +1,11 @@
 <template>
-  <!-- Only the chart -->
-  <div ref="chartRef" class="chart"></div>
+  <!-- Side panel (left) + chart (right) -->
+  <div class="layout">
+    <SidePanel :transect-num="currentTransectNum" />
+    <div class="chart-wrap">
+      <div ref="chartRef" class="chart"></div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -8,6 +13,7 @@ import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import * as echarts from 'echarts'
+import SidePanel from '@/components/SidePanel.vue'
 
 const DEFAULT_TRANSECT_NUMBER = 1000475
 
@@ -143,7 +149,7 @@ function buildSeries (rspX) {
         },
         data: [{
           name: 'RSP Lijn',
-          xAxis: rspX,               // numeric x-axis value (meters)
+          xAxis: rspX,
           itemStyle: { color: '#000' }
         }]
       }
@@ -212,9 +218,15 @@ function renderChart () {
         selector: [{ title: 'All' }],
         selectorPosition: 'start',
       },
-      grid: { top: 142, right: 42, bottom: 96, left: 56 },
+      grid: {
+        top: 142,
+        right: 72,
+        bottom: 96,
+        left: 72,
+        containLabel: true,
+      },
       xAxis: {
-        type: 'value',                 // numeric axis
+        type: 'value',
         name: 'cross_shore (m)',
         nameLocation: 'middle',
         nameGap: 32,
@@ -248,7 +260,10 @@ function handleResize () {
 }
 
 onMounted(async () => {
+  // Ensure catalogs needed by both the chart and the side panel are present
   await store.fetchTransectIdList()
+  await store.fetchAlongshoreList()
+
   if (!indexNotFound.value) {
     await fetchNow()
   }
@@ -271,6 +286,9 @@ watch(() => route.params.transectNum, async () => {
   if (!store.idList?.length) {
     await store.fetchTransectIdList()
   }
+  if (!store.alongshoreList?.length) {
+    await store.fetchAlongshoreList()
+  }
   if (!indexNotFound.value) {
     await fetchNow()
   }
@@ -280,9 +298,21 @@ watch(() => route.params.transectNum, async () => {
 </script>
 
 <style scoped>
+.layout {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 600px;
+}
+
+.chart-wrap {
+  flex: 1;
+  min-width: 0;
+  padding: 0 24px;
+  overflow: visible;
+}
+
 .chart {
-  padding-left: 80px;
-  padding-right: 80px;
   width: 100%;
   height: 600px;
 }
