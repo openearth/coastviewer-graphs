@@ -1,7 +1,7 @@
 <template>
   <aside class="panel">
-      <div class="panel__title">Transect</div>
-      <div class="panel__value">{{ currentTransectIdDisplay }}</div>
+      <div class="panel__title" style="font-size: 16px">Transect</div>
+      <div class="panel__value" style="font-size: 32px">{{ currentTransectIdDisplay }}</div>
 
     <div v-if="alongshoreForTransect !== null">
       <div class="panel__title mt">Alongshore</div>
@@ -21,6 +21,16 @@
     <div v-if="rspXY">
       <div class="panel__title mt">RSP (x, y)</div>
       <div class="panel__value" style="white-space: pre-line">{{ rspXY }}</div>
+    </div>
+
+    <div v-if="meanLowForTransect !== null">
+      <div class="panel__title mt">Mean low water</div>
+      <div class="panel__value">{{ meanLowForTransect }} m</div>
+    </div>
+
+    <div v-if="meanHighForTransect !== null">
+      <div class="panel__title mt">Mean high water</div>
+      <div class="panel__value">{{ meanHighForTransect }} m</div>
     </div>
   </aside>
 </template>
@@ -46,6 +56,8 @@ onMounted(async () => {
     store.fetchAreaInfo(),
     // rsp_x, rsp_y, rsp_lat, rsp_lon
     store.fetchRspInfo(),
+    // mean_low_water, mean_high_water
+    store.fetchWaterLevelsInfo(),
   ])
 })
 
@@ -119,6 +131,28 @@ const rspXY = computed(() => {
   return `${fmtXY(xs[idx])} m E, \n${fmtXY(ys[idx])} m N \n(EPSG:28992)`
 })
 
+// mean water values for current transect
+function fmtWater (v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '-'
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  return n.toFixed(2)
+}
+
+const meanLowForTransect = computed(() => {
+  const idx = wantedIndex.value
+  const list = store.meanLowWaterList || []
+  if (idx < 0 || idx >= list.length) return null
+  return fmtWater(list[idx])
+})
+
+const meanHighForTransect = computed(() => {
+  const idx = wantedIndex.value
+  const list = store.meanHighWaterList || []
+  if (idx < 0 || idx >= list.length) return null
+  return fmtWater(list[idx])
+})
+
 // Keep info in sync if route changes later
 watch(() => route.params.transectNum, async () => {
   if (!store.idList?.length) await store.fetchTransectIdList()
@@ -126,6 +160,9 @@ watch(() => route.params.transectNum, async () => {
   if (!store.areacodeList?.length || !store.areanameList?.length) await store.fetchAreaInfo()
   if (!store.rspXList?.length || !store.rspYList?.length || !store.rspLatList?.length || !store.rspLonList?.length) {
     await store.fetchRspInfo()
+  }
+  if (!store.meanLowWaterList?.length || !store.meanHighWaterList?.length) {
+    await store.fetchWaterLevelsInfo()
   }
 })
 </script>

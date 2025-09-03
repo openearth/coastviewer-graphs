@@ -1,3 +1,4 @@
+// stores/app.js
 // Utilities
 import { defineStore } from 'pinia'
 
@@ -14,10 +15,15 @@ const AREA_URL
 const RSP_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?rsp_x[0:1:2464],rsp_y[0:1:2464],rsp_lat[0:1:2464],rsp_lon[0:1:2464]'
 
+// NEW: mean low/high water
+const WATER_URL
+  = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?mean_high_water[0:1:2464],mean_low_water[0:1:2464]'
+
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
 const RSP_CACHE_KEY = 'jarkus_rsp_v1' // NEW
+const WATER_CACHE_KEY = 'jarkus_water_v1' // NEW
 
 // cache only if the text is smaller than this many chars (~bytes)
 const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
@@ -44,6 +50,15 @@ function tokenizeNumbers (block) {
     return []
   }
   return matches.map(Number)
+}
+
+// NEW: Tokenizer that preserves NaN positions (maps them to null)
+function tokenizeNumbersKeepNaN (block) {
+  if (!block) {
+    return []
+  }
+  const matches = block.match(NUM_RE) || []
+  return matches.map(tok => (/^nan$/i.test(tok) ? null : Number(tok)))
 }
 
 function toYearLabels (timeVals) {
@@ -292,6 +307,12 @@ export const useAppStore = defineStore('app', {
     rspLatList: [],
     rspLonList: [],
 
+    // NEW: Mean water levels
+    loadingWater: false,
+    waterError: null,
+    meanLowWaterList: [],
+    meanHighWaterList: [],
+
     // fetch cancellation
     _aborter: null,
   }),
@@ -494,6 +515,56 @@ export const useAppStore = defineStore('app', {
         this.rspError = error?.message || String(error)
       } finally {
         this.loadingRsp = false
+      }
+    },
+
+    // NEW --- Mean low/high water arrays ---
+    async fetchWaterLevelsInfo () {
+      if (this.meanLowWaterList?.length && this.meanHighWaterList?.length) {
+        return
+      }
+
+      const cached = localStorage.getItem(WATER_CACHE_KEY)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          if (Array.isArray(obj.low) && Array.isArray(obj.high)
+            && obj.low.length > 0 && obj.low.length === obj.high.length) {
+            this.meanLowWaterList = obj.low
+            this.meanHighWaterList = obj.high
+            return
+          }
+        } catch { /* ignore */ }
+      }
+
+      this.loadingWater = true
+      this.waterError = null
+      try {
+        const res = await fetch(WATER_URL, { cache: 'no-store' })
+        if (!res.ok) {
+          throw new Error(`Failed to load mean water levels (${res.status})`)
+        }
+        const text = await res.text()
+
+        const highBlock = capturePayloadBlock(text, 'mean_high_water')
+        const lowBlock = capturePayloadBlock(text, 'mean_low_water')
+
+        const high = tokenizeNumbersKeepNaN(stripOpendapIndices(highBlock))
+        const low = tokenizeNumbersKeepNaN(stripOpendapIndices(lowBlock))
+
+        if (high.length === 0 || high.length !== low.length) {
+          throw new Error('Water level arrays size mismatch or empty')
+        }
+
+        // Normalize: keep numbers; convert NaN to null (already done by tokenizer)
+        this.meanHighWaterList = high
+        this.meanLowWaterList = low
+
+        localStorage.setItem(WATER_CACHE_KEY, JSON.stringify({ high, low }))
+      } catch (error) {
+        this.waterError = error?.message || String(error)
+      } finally {
+        this.loadingWater = false
       }
     },
 
