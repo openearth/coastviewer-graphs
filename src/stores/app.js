@@ -10,9 +10,14 @@ const ALONG_URL
 const AREA_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?areacode[0:1:2464],areaname[0:1:2464]'
 
+// NEW: fetch rsp_x, rsp_y, rsp_lat, rsp_lon together
+const RSP_URL
+  = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?rsp_x[0:1:2464],rsp_y[0:1:2464],rsp_lat[0:1:2464],rsp_lon[0:1:2464]'
+
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
+const RSP_CACHE_KEY = 'jarkus_rsp_v1' // NEW
 
 // cache only if the text is smaller than this many chars (~bytes)
 const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
@@ -279,6 +284,14 @@ export const useAppStore = defineStore('app', {
     areacodeList: [],
     areanameList: [],
 
+    // NEW: RSP info
+    loadingRsp: false,
+    rspError: null,
+    rspXList: [],
+    rspYList: [],
+    rspLatList: [],
+    rspLonList: [],
+
     // fetch cancellation
     _aborter: null,
   }),
@@ -423,6 +436,64 @@ export const useAppStore = defineStore('app', {
         this.areaError = error?.message || String(error)
       } finally {
         this.loadingArea = false
+      }
+    },
+
+    // NEW --- RSP info (rsp_x, rsp_y, rsp_lat, rsp_lon) ---
+    async fetchRspInfo () {
+      if (this.rspXList?.length && this.rspYList?.length && this.rspLatList?.length && this.rspLonList?.length) {
+        return
+      }
+
+      const cached = localStorage.getItem(RSP_CACHE_KEY)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const ok = Array.isArray(obj.x) && Array.isArray(obj.y) && Array.isArray(obj.lat) && Array.isArray(obj.lon)
+          if (ok && obj.x.length > 0 && obj.x.length === obj.y.length && obj.x.length === obj.lat.length && obj.x.length === obj.lon.length) {
+            this.rspXList = obj.x
+            this.rspYList = obj.y
+            this.rspLatList = obj.lat
+            this.rspLonList = obj.lon
+            return
+          }
+        } catch { /* ignore */ }
+      }
+
+      this.loadingRsp = true
+      this.rspError = null
+      try {
+        const res = await fetch(RSP_URL, { cache: 'no-store' })
+        if (!res.ok) {
+          throw new Error(`Failed to load RSP info (${res.status})`)
+        }
+        const text = await res.text()
+
+        const xBlock = capturePayloadBlock(text, 'rsp_x')
+        const yBlock = capturePayloadBlock(text, 'rsp_y')
+        const latBlock = capturePayloadBlock(text, 'rsp_lat')
+        const lonBlock = capturePayloadBlock(text, 'rsp_lon')
+
+        const x = tokenizeNumbers(stripOpendapIndices(xBlock))
+        const y = tokenizeNumbers(stripOpendapIndices(yBlock))
+        const lat = tokenizeNumbers(stripOpendapIndices(latBlock))
+        const lon = tokenizeNumbers(stripOpendapIndices(lonBlock))
+
+        const n = x.length
+        if (!n || y.length !== n || lat.length !== n || lon.length !== n) {
+          throw new Error('RSP arrays size mismatch or empty')
+        }
+
+        this.rspXList = x
+        this.rspYList = y
+        this.rspLatList = lat
+        this.rspLonList = lon
+
+        localStorage.setItem(RSP_CACHE_KEY, JSON.stringify({ x, y, lat, lon }))
+      } catch (error) {
+        this.rspError = error?.message || String(error)
+      } finally {
+        this.loadingRsp = false
       }
     },
 

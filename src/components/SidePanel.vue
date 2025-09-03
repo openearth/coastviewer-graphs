@@ -12,6 +12,16 @@
       <div class="panel__title mt">Area</div>
       <div class="panel__value">{{ areaDisplay }}</div>
     </div>
+
+    <div v-if="rspLatLon">
+      <div class="panel__title mt">RSP (lat, lon)</div>
+      <div class="panel__value" style="white-space: pre-line">{{ rspLatLon }}</div>
+    </div>
+
+    <div v-if="rspXY">
+      <div class="panel__title mt">RSP (x, y)</div>
+      <div class="panel__value" style="white-space: pre-line">{{ rspXY }}</div>
+    </div>
   </aside>
 </template>
 
@@ -34,6 +44,8 @@ onMounted(async () => {
     store.fetchAlongshoreList(),
     // area info (areacode + areaname)
     store.fetchAreaInfo(),
+    // rsp_x, rsp_y, rsp_lat, rsp_lon
+    store.fetchRspInfo(),
   ])
 })
 
@@ -80,11 +92,41 @@ const areaDisplay = computed(() => {
   return `${code}: ${name}`
 })
 
+// Helpers to format numbers for display
+function fmtLatLon (v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toFixed(6) : ''
+}
+function fmtXY (v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? Math.round(n) : ''
+}
+
+// RSP pairs (lat,lon) and (x,y) for current transect
+const rspLatLon = computed(() => {
+  const idx = wantedIndex.value
+  const lat = store.rspLatList || []
+  const lon = store.rspLonList || []
+  if (idx < 0 || idx >= lat.length || idx >= lon.length) return ''
+  return `${fmtLatLon(lat[idx])}°N, \n${fmtLatLon(lon[idx])}°E`
+})
+
+const rspXY = computed(() => {
+  const idx = wantedIndex.value
+  const xs = store.rspXList || []
+  const ys = store.rspYList || []
+  if (idx < 0 || idx >= xs.length || idx >= ys.length) return ''
+  return `${fmtXY(xs[idx])} m E, \n${fmtXY(ys[idx])} m N \n(EPSG:28992)`
+})
+
 // Keep info in sync if route changes later
 watch(() => route.params.transectNum, async () => {
   if (!store.idList?.length) await store.fetchTransectIdList()
   if (!store.alongshoreList?.length) await store.fetchAlongshoreList()
   if (!store.areacodeList?.length || !store.areanameList?.length) await store.fetchAreaInfo()
+  if (!store.rspXList?.length || !store.rspYList?.length || !store.rspLatList?.length || !store.rspLonList?.length) {
+    await store.fetchRspInfo()
+  }
 })
 </script>
 
@@ -109,6 +151,7 @@ watch(() => route.params.transectNum, async () => {
   font-size: 20px;
   font-weight: 600;
   color: #222;
+  word-break: break-word;
 }
 
 .mt { margin-top: 16px; }
