@@ -1,57 +1,91 @@
 <template>
   <aside class="panel">
-    <div class="panel__title">Transect</div>
-    <div class="panel__value">{{ transectNum }}</div>
+      <div class="panel__title">Transect</div>
+      <div class="panel__value">{{ currentTransectIdDisplay }}</div>
 
-    <div class="panel__title mt">Alongshore</div>
-    <div class="panel__value">
-      <template v-if="alongshoreAtIndex != null">
-        {{ formatNumber(alongshoreAtIndex) }} m
-      </template>
-      <template v-else>—</template>
+    <div v-if="alongshoreForTransect !== null">
+      <div class="panel__title mt">Alongshore</div>
+      <div class="panel__value">{{ alongshoreForTransect }} m</div>
+    </div>
+
+    <div v-if="areaDisplay">
+      <div class="panel__title mt">Area</div>
+      <div class="panel__value">{{ areaDisplay }}</div>
     </div>
   </aside>
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 
-const props = defineProps({
-  transectNum: {
-    type: Number,
-    required: true,
-  },
-})
+const DEFAULT_TRANSECT_NUMBER = 1000475
 
+const route = useRoute()
 const store = useAppStore()
 
-// Ensure the lists are loaded (cheap no-ops if already loaded)
+// Ensure we have base lists
 onMounted(async () => {
-  if (!store.idList?.length) {
-    await store.fetchTransectIdList()
-  }
-  if (!store.alongshoreList?.length) {
-    await store.fetchAlongshoreList()
-  }
+  await Promise.all([
+    // id list is needed to resolve the index of the current transect
+    store.fetchTransectIdList(),
+    // alongshore list
+    store.fetchAlongshoreList(),
+    // area info (areacode + areaname)
+    store.fetchAreaInfo(),
+  ])
 })
 
+// Current route-based transect number (fallback)
+const currentTransectNum = computed(() => {
+  const raw = route.params.transectNum
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_TRANSECT_NUMBER
+})
+
+// Index into the lists
 const wantedIndex = computed(() => {
-  if (!store.idList?.length) return -1
-  return store.idList.indexOf(props.transectNum)
+  const ids = store.idList || []
+  if (!ids.length) return -1
+  return ids.indexOf(currentTransectNum.value)
 })
 
-const alongshoreAtIndex = computed(() => {
+const indexNotFound = computed(() => wantedIndex.value < 0)
+
+// Displayed transect id (from the ids list if present, else the route param)
+const currentTransectIdDisplay = computed(() => {
+  if (!indexNotFound.value) {
+    return store.idList[wantedIndex.value]
+  }
+  return currentTransectNum.value
+})
+
+// Alongshore value for current transect
+const alongshoreForTransect = computed(() => {
   const idx = wantedIndex.value
-  if (idx < 0) return null
-  const arr = store.alongshoreList || []
-  return idx < arr.length ? arr[idx] : null
+  const list = store.alongshoreList || []
+  if (idx < 0 || idx >= list.length) return null
+  return list[idx]
 })
 
-function formatNumber (n) {
-  // You can tweak this to a fixed precision if needed
-  return Number(n).toLocaleString(undefined, { maximumFractionDigits: 3 })
-}
+// Area: "<code>: <name>"
+const areaDisplay = computed(() => {
+  const idx = wantedIndex.value
+  const codes = store.areacodeList || []
+  const names = store.areanameList || []
+  if (idx < 0 || idx >= codes.length || idx >= names.length) return ''
+  const code = codes[idx]
+  const name = (names[idx] || '').trim()
+  return `${code}: ${name}`
+})
+
+// Keep info in sync if route changes later
+watch(() => route.params.transectNum, async () => {
+  if (!store.idList?.length) await store.fetchTransectIdList()
+  if (!store.alongshoreList?.length) await store.fetchAlongshoreList()
+  if (!store.areacodeList?.length || !store.areanameList?.length) await store.fetchAreaInfo()
+})
 </script>
 
 <style scoped>

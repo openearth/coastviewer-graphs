@@ -4,11 +4,15 @@ import { defineStore } from 'pinia'
 const IDS_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?id[0:1:2464]'
 
-const ALONGSHORE_URL
+// Fetch alongshore, areacode and areaname in one round-trip each
+const ALONG_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?alongshore[0:1:2464]'
+const AREA_URL
+  = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?areacode[0:1:2464],areaname[0:1:2464]'
 
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
-const ALONGSHORE_CACHE_KEY = 'jarkus_alongshore_list_v1'
+const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
+const AREA_CACHE_KEY = 'jarkus_area_v1'
 
 // cache only if the text is smaller than this many chars (~bytes)
 const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
@@ -61,7 +65,7 @@ function toYearLabels (timeVals) {
 }
 
 /**
- * Robustly grab only the numeric payload that follows a header like:
+ * Robustly grab only the numeric/text payload that follows a header like:
  *   altitude[time = 60][alongshore = 1][cross_shore = 2463]
  *   cross_shore[2463]
  *   cross_shore [0:1:2462]
@@ -165,7 +169,7 @@ function parseOpendapAscii (ascii) {
   const X = cross.length
 
   for (let i = 0; i < flatAlt.length; i++) {
-    if (flatAlt[i] === -9999 || flatAlt[i] === -9999) {
+    if (flatAlt[i] === -9999) {
       flatAlt[i] = null
     }
   }
@@ -193,7 +197,6 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
-
       break
     }
     case X * T: {
@@ -206,7 +209,6 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
-
       break
     }
     case T * 1 * X: {
@@ -222,7 +224,6 @@ function parseOpendapAscii (ascii) {
         }
         altitude2D[t] = row
       }
-
       break
     }
     default: {
@@ -233,6 +234,16 @@ function parseOpendapAscii (ascii) {
   }
 
   return buildChartData(cross, time, altitude2D)
+}
+
+// --- helpers: parse strings list from payload (e.g., areaname) ---
+function parseQuotedStringArray (payload) {
+  if (!payload) {
+    return []
+  }
+  const clean = stripOpendapIndices(payload)
+  const matches = clean.match(/"([^"]*)"/g) || []
+  return matches.map(s => s.replace(/^"/, '').replace(/"$/, '').trim())
 }
 
 export const useAppStore = defineStore('app', {
@@ -257,11 +268,16 @@ export const useAppStore = defineStore('app', {
     idList: [],
     idsFetchedAt: null,
 
-    // alongshore list (value per alongshore index)
-    loadingAlongshore: false,
-    alongshoreError: null,
+    // alongshore
+    loadingAlong: false,
+    alongError: null,
     alongshoreList: [],
-    alongshoreFetchedAt: null,
+
+    // area info
+    loadingArea: false,
+    areaError: null,
+    areacodeList: [],
+    areanameList: [],
 
     // fetch cancellation
     _aborter: null,
@@ -308,62 +324,106 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // FIX: only parse numbers from the payload section after the dashed line
-    // and after the 'id[...]' header, ignoring the preamble dimension (2465).
+    // Parse only from the payload, ignoring the preamble "id[2465]"
     _parseIdList (ascii) {
       const payload = capturePayloadBlock(ascii, 'id')
       const clean = stripOpendapIndices(payload)
       const nums = tokenizeNumbers(clean)
-      // They are Int32 IDs; coerce to integers and return.
       return nums.map(n => Number.parseInt(String(n), 10)).filter(Number.isFinite)
     },
 
-    // --- Alongshore list (floats) ---
+    // --- Alongshore list (index per transect) ---
     async fetchAlongshoreList () {
-      if (this.alongshoreList && this.alongshoreList.length > 0) {
+      if (this.alongshoreList?.length) {
         return
       }
 
-      const cached = localStorage.getItem(ALONGSHORE_CACHE_KEY)
+      const cached = localStorage.getItem(ALONG_CACHE_KEY)
       if (cached) {
         try {
           const obj = JSON.parse(cached)
           if (Array.isArray(obj.list) && obj.list.length > 0) {
             this.alongshoreList = obj.list
-            this.alongshoreFetchedAt = obj.when || null
             return
           }
         } catch { /* ignore */ }
       }
 
-      this.loadingAlongshore = true
-      this.alongshoreError = null
+      this.loadingAlong = true
+      this.alongError = null
       try {
-        const res = await fetch(ALONGSHORE_URL, { cache: 'no-store' })
+        const res = await fetch(ALONG_URL, { cache: 'no-store' })
         if (!res.ok) {
           throw new Error(`Failed to load alongshore list (${res.status})`)
         }
         const text = await res.text()
-        const list = this._parseAlongshoreList(text)
-        if (!list || list.length === 0) {
+        const payload = capturePayloadBlock(text, 'alongshore')
+        const clean = stripOpendapIndices(payload)
+        const nums = tokenizeNumbers(clean)
+        const list = nums.map(n => Number.parseInt(String(n), 10)).filter(Number.isFinite)
+        if (list.length === 0) {
           throw new Error('Could not parse alongshore list')
         }
         this.alongshoreList = list
-        this.alongshoreFetchedAt = Date.now()
-        localStorage.setItem(ALONGSHORE_CACHE_KEY, JSON.stringify({ list, when: this.alongshoreFetchedAt }))
+        localStorage.setItem(ALONG_CACHE_KEY, JSON.stringify({ list }))
       } catch (error) {
-        this.alongshoreError = error?.message || String(error)
+        this.alongError = error?.message || String(error)
       } finally {
-        this.loadingAlongshore = false
+        this.loadingAlong = false
       }
     },
 
-    _parseAlongshoreList (ascii) {
-      const payload = capturePayloadBlock(ascii, 'alongshore')
-      const clean = stripOpendapIndices(payload)
-      const nums = tokenizeNumbers(clean)
-      // alongshore is numeric (likely meters or an index mapping); keep as Number
-      return nums.filter(Number.isFinite)
+    // --- Area info (areacode + areaname) ---
+    async fetchAreaInfo () {
+      if (this.areacodeList?.length && this.areanameList?.length) {
+        return
+      }
+
+      const cached = localStorage.getItem(AREA_CACHE_KEY)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          if (Array.isArray(obj.codes) && Array.isArray(obj.names)
+            && obj.codes.length > 0 && obj.codes.length === obj.names.length) {
+            this.areacodeList = obj.codes
+            this.areanameList = obj.names
+            return
+          }
+        } catch { /* ignore */ }
+      }
+
+      this.loadingArea = true
+      this.areaError = null
+      try {
+        const res = await fetch(AREA_URL, { cache: 'no-store' })
+        if (!res.ok) {
+          throw new Error(`Failed to load area info (${res.status})`)
+        }
+        const text = await res.text()
+
+        const codeBlock = capturePayloadBlock(text, 'areacode')
+        const nameBlock = capturePayloadBlock(text, 'areaname')
+
+        const cleanCodes = stripOpendapIndices(codeBlock)
+        const codes = tokenizeNumbers(cleanCodes)
+          .map(n => Number.parseInt(String(n), 10))
+          .filter(Number.isFinite)
+
+        const names = parseQuotedStringArray(nameBlock)
+
+        if (codes.length === 0 || names.length === 0 || codes.length !== names.length) {
+          throw new Error('Area arrays size mismatch or empty')
+        }
+
+        this.areacodeList = codes
+        this.areanameList = names
+
+        localStorage.setItem(AREA_CACHE_KEY, JSON.stringify({ codes, names }))
+      } catch (error) {
+        this.areaError = error?.message || String(error)
+      } finally {
+        this.loadingArea = false
+      }
     },
 
     // --- OpenDAP data fetch & cautious cache + parsing to chart format ---
