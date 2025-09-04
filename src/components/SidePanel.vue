@@ -1,7 +1,21 @@
 <template>
   <aside class="panel">
       <div class="panel__title" style="font-size: 16px">Transect</div>
-      <div class="panel__value" style="font-size: 32px">{{ currentTransectIdDisplay }}</div>
+      <div class="panel__value panel__value--big with-icon">{{ currentTransectIdDisplay }}
+        <span v-if="showMismatchIcon" class="sup-icon">
+          <VTooltip :text="tooltipText" location="right">
+            <template v-slot:activator="{ props }">
+              <VIcon
+                v-bind="props"
+                :size="20"
+                color="rgb(255,143,0)"
+                class="summary-info"
+                icon="mdi-swap-horizontal"
+              />
+            </template>
+          </VTooltip>
+        </span>
+      </div>
 
     <div v-if="alongshoreForTransect !== null">
       <div class="panel__title mt">Alongshore</div>
@@ -36,14 +50,21 @@
 </template>
 
 <script setup>
-import { computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, watch, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 
 const DEFAULT_TRANSECT_NUMBER = 1000475
 
 const route = useRoute()
+const router = useRouter()
 const store = useAppStore()
+
+// Track non-exact slug the user tried (for tooltip), even after URL normalization
+const nonExactEntered = ref(null)
+
+// Remember when we just normalized, so we don't clear the flag right away
+const didNormalizeOnce = ref(false)
 
 // Ensure we have base lists
 onMounted(async () => {
@@ -59,6 +80,7 @@ onMounted(async () => {
     // mean_low_water, mean_high_water
     store.fetchWaterLevelsInfo(),
   ])
+  normalizeSlugToClosest()
 })
 
 // Current route-based transect number (fallback)
@@ -68,22 +90,88 @@ const currentTransectNum = computed(() => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_TRANSECT_NUMBER
 })
 
-// Index into the lists
+// Helper: find closest index in an array of numeric IDs
+function findClosestIndex (ids, target) {
+  if (!ids || !ids.length) return -1
+  let bestIdx = 0
+  let bestDiff = Math.abs(ids[0] - target)
+  for (let i = 1; i < ids.length; i++) {
+    const diff = Math.abs(ids[i] - target)
+    if (diff < bestDiff) {
+      bestDiff = diff
+      bestIdx = i
+    }
+  }
+  return bestIdx
+}
+
+// Index into the lists (closest match if no exact)
 const wantedIndex = computed(() => {
   const ids = store.idList || []
   if (!ids.length) return -1
-  return ids.indexOf(currentTransectNum.value)
+  const exact = ids.indexOf(currentTransectNum.value)
+  return exact !== -1 ? exact : findClosestIndex(ids, currentTransectNum.value)
 })
 
 const indexNotFound = computed(() => wantedIndex.value < 0)
 
-// Displayed transect id (from the ids list if present, else the route param)
+// Displayed transect id (always from list when available)
 const currentTransectIdDisplay = computed(() => {
   if (!indexNotFound.value) {
     return store.idList[wantedIndex.value]
   }
   return currentTransectNum.value
 })
+
+// Show tiny icon only when user entered a non-exact, we snapped to nearest
+const showMismatchIcon = computed(() => {
+  const ids = store.idList || []
+  if (!ids.length) return false
+  return nonExactEntered.value != null
+})
+
+// Tooltip text with the original (invalid) slug
+const tooltipText = computed(() => {
+  if (nonExactEntered.value == null) return ''
+  const val = Number(nonExactEntered.value)
+  const shown = Number.isFinite(val) ? String(Math.trunc(val)) : String(nonExactEntered.value)
+  return `The selected transect number, ${shown}, is not valid. The information being displayed corresponds to its nearest valid transect.`
+})
+
+// Canonicalize URL to the closest known ID so the whole app follows it
+function normalizeSlugToClosest () {
+  const ids = store.idList || []
+  if (!ids.length) return
+
+  const target = currentTransectNum.value
+  const exact = ids.indexOf(target)
+  const idx = exact !== -1 ? exact : findClosestIndex(ids, target)
+  if (idx < 0) return
+  const closestId = ids[idx]
+
+  if (exact === -1) {
+    // user entered an invalid slug; remember it and normalize once
+    nonExactEntered.value = target
+    didNormalizeOnce.value = true
+    if (String(closestId) !== String(route.params.transectNum)) {
+      router.replace({
+        name: route.name,
+        params: { ...route.params, transectNum: String(closestId) },
+        query: route.query,
+        hash: route.hash,
+      })
+    }
+  } else {
+    // exact slug now; if this is the immediate call after our replace, keep the flag
+    if (didNormalizeOnce.value) {
+      didNormalizeOnce.value = false
+      // keep nonExactEntered as-is so the icon still shows for this navigation
+    } else {
+      // user navigated to an exact ID themselves later -> clear the flag
+      nonExactEntered.value = null
+    }
+  }
+}
 
 // Alongshore value for current transect
 const alongshoreForTransect = computed(() => {
@@ -164,6 +252,7 @@ watch(() => route.params.transectNum, async () => {
   if (!store.meanLowWaterList?.length || !store.meanHighWaterList?.length) {
     await store.fetchWaterLevelsInfo()
   }
+  normalizeSlugToClosest()
 })
 </script>
 
@@ -190,6 +279,23 @@ watch(() => route.params.transectNum, async () => {
   color: #222;
   word-break: break-word;
 }
+
+.panel__value--big { font-size: 32px; }
+
+.with-icon { position: relative; display: inline-block; padding-right: 18px; }
+.sup-icon {
+  position: absolute;
+  top: -4px;
+  right: -2px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.9;
+}
+
+.sup-icon:hover .mdi { color: #111; opacity: 1; }
 
 .mt { margin-top: 16px; }
 </style>
