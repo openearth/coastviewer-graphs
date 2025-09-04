@@ -135,7 +135,7 @@ const tooltipText = computed(() => {
   if (nonExactEntered.value == null) return ''
   const val = Number(nonExactEntered.value)
   const shown = Number.isFinite(val) ? String(Math.trunc(val)) : String(nonExactEntered.value)
-  return `The selected transect number, ${shown}, is not valid. The information being displayed corresponds to its nearest valid transect.`
+  return `The selected transect id (${shown}) is not valid. The information being displayed corresponds to its nearest valid transect.`
 })
 
 // Canonicalize URL to the closest known ID so the whole app follows it
