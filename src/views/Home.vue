@@ -201,11 +201,11 @@ function renderChart () {
           })
           if (valid.length === 0) return ''
           const { x } = getXY(valid[0])
-          const header = `cross_shore: ${x}`
+          const header = `<b>Cross-shore: ${x} m</b>`
           const lines = valid.map(p => {
             const { y } = getXY(p)
             const marker = p.marker || ''
-            return `${marker}${p.seriesName}: ${y}`
+            return `<b>${marker}${p.seriesName}</b>: ${y} m`
           })
           return [header, ...lines].join('<br/>')
         },
@@ -227,7 +227,7 @@ function renderChart () {
       },
       xAxis: {
         type: 'value',
-        name: 'cross_shore (m)',
+        name: 'Cross-shore (m)',
         nameLocation: 'middle',
         nameGap: 32,
         min: xMin,
@@ -236,7 +236,7 @@ function renderChart () {
       },
       yAxis: {
         type: 'value',
-        name: 'altitude (m)',
+        name: 'Elevation (m)',
         nameLocation: 'middle',
         nameGap: 42,
       },
