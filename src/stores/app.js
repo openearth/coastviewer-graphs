@@ -31,13 +31,17 @@ const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
 // --- Helper: tolerant number tokenizer (float, int, sci, NaN) ---
 const NUM_RE = /-?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][+-]?\d+)?|NaN/gi
 
+// Pre-compile regex for better performance
+const INDEX_PATTERN = /(^|\n)\s*(?:\[\d+\]){1,4},\s*/g
+const NUM_PATTERN = /[-+]?(?:\d+\.\d+|\d+\.|\.\d+|\d+)(?:[eE][-+]?\d+)?/g
+
 function stripOpendapIndices (block) {
   if (!block) {
     return ''
   }
   // Remove leading index tags per line: e.g. "[0][0], " or "[59][0], "
   // (^|\n) keep the break; {1,4} in case 2–3 indices appear
-  return block.replace(/(^|\n)\s*(?:\[\d+\]){1,4},\s*/g, '$1')
+  return block.replace(INDEX_PATTERN, '$1')
 }
 
 function tokenizeNumbers (block) {
@@ -45,11 +49,16 @@ function tokenizeNumbers (block) {
     return []
   }
   // Grab only numeric tokens: optional sign, decimals, and exponent part.
-  const matches = block.match(/[-+]?(?:\d+\.\d+|\d+\.|\.\d+|\d+)(?:[eE][-+]?\d+)?/g)
+  const matches = block.match(NUM_PATTERN)
   if (!matches) {
     return []
   }
-  return matches.map(Number)
+  // Use pre-allocated array for better performance
+  const result = Array.from({ length: matches.length })
+  for (const [i, match] of matches.entries()) {
+    result[i] = Number(match)
+  }
+  return result
 }
 
 // NEW: Tokenizer that preserves NaN positions (maps them to null)
@@ -573,11 +582,45 @@ export const useAppStore = defineStore('app', {
       if (!url) {
         return
       }
+
+      // Check cache FIRST before making network request for instant loading
+      const cacheKey = this._cacheKey(url)
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const text = obj.data || ''
+          if (text) {
+            // Parse cached data immediately (synchronous, fast)
+            const parsed = parseOpendapAscii(text)
+            this.chartData = parsed.chartData
+            this.years = parsed.years
+            this.crossShore = parsed.crossShore
+            this.altitudeByYear = parsed.altitudeByYear
+            this.chartReady = true
+            this.rawText = text
+            this.fetchedAt = obj.t || null
+            this.error = null
+            this.warning = null
+            this.loading = false
+
+            // Still fetch in background to refresh cache (non-blocking)
+            this._refreshCacheInBackground(url)
+            return
+          }
+        } catch (error) {
+          // Cache corrupted, continue to fetch
+          console.warn('Cache parse error, fetching fresh:', error)
+        }
+      }
+
       // Cancel any in-flight request
       if (this._aborter) {
         try {
           this._aborter.abort()
-        } catch {}
+        } catch {
+          // Silent abort error
+        }
       }
       this._aborter = new AbortController()
 
@@ -609,7 +652,7 @@ export const useAppStore = defineStore('app', {
         // Try to cache only if reasonably small
         if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
           try {
-            localStorage.setItem(this._cacheKey(url), JSON.stringify({ t: this.fetchedAt, data: text }))
+            localStorage.setItem(cacheKey, JSON.stringify({ t: this.fetchedAt, data: text }))
           } catch {
             this.warning = 'Data fetched and parsed, but too large to cache locally. It will not be stored for offline reuse.'
           }
@@ -624,6 +667,29 @@ export const useAppStore = defineStore('app', {
         }
       } finally {
         this.loading = false
+      }
+    },
+
+    // Background cache refresh (non-blocking)
+    async _refreshCacheInBackground (url) {
+      // Silently refresh cache in background without blocking UI
+      try {
+        const res = await fetch(url, { cache: 'no-store' })
+        if (res.ok) {
+          const text = await res.text()
+          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+            try {
+              localStorage.setItem(this._cacheKey(url), JSON.stringify({
+                t: Date.now(),
+                data: text,
+              }))
+            } catch {
+              // Silent fail for background refresh
+            }
+          }
+        }
+      } catch {
+        // Silent fail for background refresh
       }
     },
 

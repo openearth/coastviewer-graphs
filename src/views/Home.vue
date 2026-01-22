@@ -20,6 +20,19 @@ const DEFAULT_TRANSECT_NUMBER = 1000475
 const route = useRoute()
 const store = useAppStore()
 
+// Debounce utility for performance optimization
+function debounce (func, wait) {
+  let timeout
+  return function executedFunction (...args) {
+    const later = () => {
+      clearTimeout(timeout)
+      func(...args)
+    }
+    clearTimeout(timeout)
+    timeout = setTimeout(later, wait)
+  }
+}
+
 // Store-derived data for charting
 const chartReady     = computed(() => store.chartReady)
 const years          = computed(() => store.years)
@@ -86,29 +99,37 @@ function disposeChart () {
   }
 }
 
-function computeXAxisBounds () {
+// Memoize expensive computations using computed properties
+const xAxisBounds = computed(() => {
   const xs = crossShore.value || []
   const byYear = altitudeByYear.value || []
   if (!xs.length || !byYear.length) {
     return { min: null, max: null }
   }
 
-  // Keep only cross_shore positions that contain at least one non-null value
-  const used = []
-  for (let i = 0; i < xs.length; i++) {
-    let ok = false
-    for (let t = 0; t < byYear.length; t++) {
-      const v = byYear[t]?.[i]
-      if (v != null && Number.isFinite(v)) { ok = true; break }
+  // Optimize: use Set for faster lookup, single pass
+  const used = new Set()
+  for (let t = 0; t < byYear.length; t++) {
+    const row = byYear[t]
+    if (!row) continue
+    for (let i = 0; i < Math.min(row.length, xs.length); i++) {
+      const v = row[i]
+      if (v != null && Number.isFinite(v)) {
+        used.add(i)
+      }
     }
-    if (ok) used.push(xs[i])
   }
-  if (!used.length) return { min: Math.min(...xs), max: Math.max(...xs) }
-  return { min: Math.min(...used), max: Math.max(...used) }
-}
 
-// Find the cross_shore position to mark (closest to 0)
-function computeRspX () {
+  if (used.size === 0) {
+    return { min: Math.min(...xs), max: Math.max(...xs) }
+  }
+
+  const usedXs = Array.from(used).map(i => xs[i])
+  return { min: Math.min(...usedXs), max: Math.max(...usedXs) }
+})
+
+// Find the cross_shore position to mark (closest to 0) - memoized
+const rspX = computed(() => {
   const xs = crossShore.value || []
   if (!xs.length) return null
   let closest = xs[0]
@@ -118,17 +139,24 @@ function computeRspX () {
     if (d < best) { best = d; closest = xs[i] }
   }
   return closest
-}
+})
 
-function buildSeries (rspX) {
+// Memoize series data
+const seriesData = computed(() => {
   const ys = years.value || []
   const xs = crossShore.value || []
   const byYear = altitudeByYear.value || []
   if (!ys.length || !xs.length || !byYear.length) return []
 
+  const rspXVal = rspX.value
+
   return ys.map((label, tIndex) => {
     const row = byYear[tIndex] || []
-    const points = xs.map((x, i) => (row[i] == null ? [x, null] : [x, row[i]]))
+    // Pre-allocate array for better performance
+    const points = new Array(xs.length)
+    for (let i = 0; i < xs.length; i++) {
+      points[i] = row[i] == null ? [xs[i], null] : [xs[i], row[i]]
+    }
 
     // Attach the vertical markLine to the first series so it spans the chart
     const seriesObj = {
@@ -139,7 +167,7 @@ function buildSeries (rspX) {
       data: points,
     }
 
-    if (tIndex === 0 && rspX != null && Number.isFinite(rspX)) {
+    if (tIndex === 0 && rspXVal != null && Number.isFinite(rspXVal)) {
       seriesObj.markLine = {
         symbol: 'none',
         lineStyle: { color: '#000', width: 1.5, type: 'dashed' },
@@ -149,14 +177,19 @@ function buildSeries (rspX) {
         },
         data: [{
           name: 'RSP Lijn',
-          xAxis: rspX,
+          xAxis: rspXVal,
           itemStyle: { color: '#000' }
         }]
       }
     }
     return seriesObj
   })
-}
+})
+
+// Memoize color palette
+const colorPalette = computed(() => {
+  return createJetColormap(seriesData.value.length)
+})
 
 // Helper to extract x/y robustly from tooltip param
 function getXY (p) {
@@ -173,10 +206,10 @@ function renderChart () {
       window.addEventListener('resize', handleResize)
     }
 
-    const { min: xMin, max: xMax } = computeXAxisBounds()
-    const rspX = computeRspX()
-    const series = buildSeries(rspX)
-    const palette = createJetColormap(series.length)
+    // Use memoized values for better performance
+    const { min: xMin, max: xMax } = xAxisBounds.value
+    const series = seriesData.value
+    const palette = colorPalette.value
 
     const option = {
       animation: true,
@@ -259,10 +292,19 @@ function handleResize () {
   if (chart) chart.resize()
 }
 
+// Debounced render function for better performance
+const debouncedRender = debounce(() => {
+  if (chartReady.value) {
+    nextTick().then(renderChart)
+  }
+}, 100) // 100ms debounce
+
 onMounted(async () => {
-  // Ensure catalogs needed by both the chart and the side panel are present
-  await store.fetchTransectIdList()
-  await store.fetchAlongshoreList()
+  // Fetch in parallel instead of sequentially for faster initial load
+  await Promise.all([
+    store.fetchTransectIdList(),
+    store.fetchAlongshoreList()
+  ])
 
   if (!indexNotFound.value) {
     await fetchNow()
@@ -276,13 +318,13 @@ onBeforeUnmount(() => {
   disposeChart()
 })
 
-// Re-render when data changes
-watch([chartReady, years, crossShore, altitudeByYear], () => {
-  if (chartReady.value) nextTick().then(renderChart)
+// Re-render when data changes (debounced for better performance)
+watch([chartReady, years, crossShore, altitudeByYear], debouncedRender, { 
+  deep: false // Shallow watch is faster
 })
 
-// Re-fetch & re-render on route change (different transect)
-watch(() => route.params.transectNum, async () => {
+// Re-fetch & re-render on route change (different transect) - debounced
+watch(() => route.params.transectNum, debounce(async () => {
   if (!store.idList?.length) {
     await store.fetchTransectIdList()
   }
@@ -294,7 +336,7 @@ watch(() => route.params.transectNum, async () => {
   }
   await nextTick()
   renderChart()
-})
+}, 150))
 </script>
 
 <style scoped>
