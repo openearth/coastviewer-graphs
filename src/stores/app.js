@@ -19,6 +19,9 @@ const RSP_URL
 const WATER_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?mean_high_water[0:1:2464],mean_low_water[0:1:2464]'
 
+// BKL_TKL_TND dataset for basal coastline
+const BKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/BKL_TKL_TND.nc.ascii'
+
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
@@ -275,6 +278,42 @@ function parseQuotedStringArray (payload) {
   return matches.map(s => s.replace(/^"/, '').replace(/"$/, '').trim())
 }
 
+// --- Parse basal coastline time series data ---
+function parseBasalCoastlineAscii (ascii) {
+  // Extract time and basal_coastline blocks
+  const timeBlock = capturePayloadBlock(ascii, 'time')
+  const basalBlock = capturePayloadBlock(ascii, 'basal_coastline')
+
+  // Clean out index tags from basal_coastline payload
+  const cleanBasalBlock = stripOpendapIndices(basalBlock)
+
+  const timeValues = tokenizeNumbers(timeBlock)
+  const basalValues = tokenizeNumbersKeepNaN(cleanBasalBlock)
+
+  if (timeValues.length === 0 || basalValues.length === 0) {
+    const head = (ascii || '').slice(0, 500)
+    throw new Error(
+      'Could not parse time/basal_coastline arrays from payload. '
+      + 'Response (first 500 chars):\n' + head,
+    )
+  }
+
+  // Convert time to year labels
+  const years = toYearLabels(timeValues)
+
+  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
+  const processedBasal = basalValues.map(v => (v === -9999 ? null : v))
+
+  // Create data points: [year, basal_coastline_value]
+  const dataPoints = years.map((year, i) => [year, processedBasal[i]])
+
+  return {
+    years,
+    basalCoastline: processedBasal,
+    dataPoints,
+  }
+}
+
 export const useAppStore = defineStore('app', {
   state: () => ({
     // data fetch
@@ -322,8 +361,18 @@ export const useAppStore = defineStore('app', {
     meanLowWaterList: [],
     meanHighWaterList: [],
 
+    // Basal coastline time series data
+    loadingBasal: false,
+    basalError: null,
+    basalYears: [],
+    basalCoastline: [],
+    basalDataPoints: [],
+    basalReady: false,
+    basalFetchedAt: null,
+
     // fetch cancellation
     _aborter: null,
+    _basalAborter: null,
   }),
 
   actions: {
@@ -574,6 +623,118 @@ export const useAppStore = defineStore('app', {
         this.waterError = error?.message || String(error)
       } finally {
         this.loadingWater = false
+      }
+    },
+
+    // --- Basal coastline time series fetch ---
+    async fetchBasalCoastline (transectIndex) {
+      if (transectIndex < 0 || transectIndex >= 2465) {
+        this.basalError = 'Invalid transect index'
+        return
+      }
+
+      // Build URL: time[0:1:63], basal_coastline[0:1:63][transectIndex]
+      const url = `${BKL_BASE_URL}?time[0:1:63],basal_coastline[0:1:63][${transectIndex}]`
+
+      // Check cache first
+      const cacheKey = `bkl_cache::${url}`
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const text = obj.data || ''
+          if (text) {
+            const parsed = parseBasalCoastlineAscii(text)
+            this.basalYears = parsed.years
+            this.basalCoastline = parsed.basalCoastline
+            this.basalDataPoints = parsed.dataPoints
+            this.basalReady = true
+            this.basalFetchedAt = obj.t || null
+            this.basalError = null
+            this.loadingBasal = false
+
+            // Refresh cache in background
+            this._refreshBasalCacheInBackground(url, cacheKey)
+            return
+          }
+        } catch (error) {
+          console.warn('Basal cache parse error, fetching fresh:', error)
+        }
+      }
+
+      // Cancel any in-flight request
+      if (this._basalAborter) {
+        try {
+          this._basalAborter.abort()
+        } catch {
+          // Silent abort error
+        }
+      }
+      this._basalAborter = new AbortController()
+
+      this.loadingBasal = true
+      this.basalError = null
+      this.basalReady = false
+      this.basalYears = []
+      this.basalCoastline = []
+      this.basalDataPoints = []
+
+      try {
+        const res = await fetch(url, { cache: 'no-store', signal: this._basalAborter.signal })
+        if (!res.ok) {
+          throw new Error(`Failed to fetch basal coastline data (${res.status})`)
+        }
+        const text = await res.text()
+        this.basalFetchedAt = Date.now()
+
+        // Parse the data
+        const parsed = parseBasalCoastlineAscii(text)
+        this.basalYears = parsed.years
+        this.basalCoastline = parsed.basalCoastline
+        this.basalDataPoints = parsed.dataPoints
+        this.basalReady = true
+
+        // Cache if reasonably small
+        if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify({
+              t: this.basalFetchedAt,
+              data: text,
+            }))
+          } catch {
+            // Cache too large or storage full
+          }
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          // Silent abort
+        } else {
+          this.basalError = error?.message || String(error)
+        }
+      } finally {
+        this.loadingBasal = false
+      }
+    },
+
+    // Background cache refresh for basal coastline
+    async _refreshBasalCacheInBackground (url, cacheKey) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' })
+        if (res.ok) {
+          const text = await res.text()
+          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify({
+                t: Date.now(),
+                data: text,
+              }))
+            } catch {
+              // Silent fail
+            }
+          }
+        }
+      } catch {
+        // Silent fail for background refresh
       }
     },
 

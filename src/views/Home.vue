@@ -1,9 +1,10 @@
 <template>
-  <!-- Side panel (left) + chart (right) -->
+  <!-- Side panel (left) + charts (right) -->
   <div class="layout">
     <SidePanel :transect-num="currentTransectNum" />
     <div class="chart-wrap">
       <div ref="chartRef" class="chart"></div>
+      <div ref="basalChartRef" class="chart"></div>
     </div>
   </div>
 </template>
@@ -38,6 +39,12 @@ const chartReady     = computed(() => store.chartReady)
 const years          = computed(() => store.years)
 const crossShore     = computed(() => store.crossShore)
 const altitudeByYear = computed(() => store.altitudeByYear)
+
+// Basal coastline data
+const basalReady = computed(() => store.basalReady)
+const basalYears = computed(() => store.basalYears)
+const basalCoastline = computed(() => store.basalCoastline)
+const basalDataPoints = computed(() => store.basalDataPoints)
 
 // Current transect number from route (fallback to default)
 const currentTransectNum = computed(() => {
@@ -92,10 +99,20 @@ function createJetColormap (n) {
 const chartRef = ref(null)
 let chart = null
 
+const basalChartRef = ref(null)
+let basalChart = null
+
 function disposeChart () {
   if (chart) {
     chart.dispose()
     chart = null
+  }
+}
+
+function disposeBasalChart () {
+  if (basalChart) {
+    basalChart.dispose()
+    basalChart = null
   }
 }
 
@@ -288,8 +305,103 @@ function renderChart () {
   }
 }
 
+function renderBasalChart () {
+  try {
+    if (!basalChartRef.value) return
+    if (!basalChart) {
+      basalChart = echarts.init(basalChartRef.value, undefined, { renderer: 'canvas' })
+      window.addEventListener('resize', handleBasalResize)
+    }
+
+    const years = basalYears.value || []
+    const values = basalCoastline.value || []
+
+    if (years.length === 0 || values.length === 0) {
+      return
+    }
+
+    const option = {
+      animation: true,
+      title: {
+        text: 'Basal Coastline Over Time',
+        left: 'center',
+        top: 8,
+        textStyle: {
+          fontSize: 20,
+          fontWeight: '600',
+        },
+      },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'line' },
+        formatter: (params) => {
+          const arr = Array.isArray(params) ? params : [params]
+          if (arr.length === 0) return ''
+          const p = arr[0]
+          const year = p.axisValue
+          const value = p.value
+          if (value == null || !Number.isFinite(value)) return ''
+          return `<b>Year: ${year}</b><br/>Basal Coastline: ${value} m`
+        },
+        showDelay: 0,
+        hideDelay: 50,
+        confine: true,
+      },
+      grid: {
+        top: 60,
+        right: 40,
+        bottom: 60,
+        left: 70,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        name: 'Year',
+        nameLocation: 'middle',
+        nameGap: 30,
+        data: years,
+        axisLabel: {
+          rotate: 45,
+        },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Cross-shore distance (m)',
+        nameLocation: 'middle',
+        nameGap: 50,
+      },
+      series: [
+        {
+          name: 'Basal Coastline',
+          type: 'line',
+          data: values,
+          showSymbol: true,
+          symbol: 'circle',
+          symbolSize: 6,
+          connectNulls: false,
+          lineStyle: {
+            width: 0, // Hide the line, show only dots
+          },
+          itemStyle: {
+            color: '#9C27B0',
+          },
+        },
+      ],
+    }
+
+    basalChart.setOption(option, true)
+  } catch (e) {
+    console.error('Basal chart render error:', e)
+  }
+}
+
 function handleResize () {
   if (chart) chart.resize()
+  if (basalChart) basalChart.resize()
+}
+
+function handleBasalResize () {
+  if (basalChart) basalChart.resize()
 }
 
 // Debounced render function for better performance
@@ -299,6 +411,12 @@ const debouncedRender = debounce(() => {
   }
 }, 100) // 100ms debounce
 
+async function fetchBasalNow () {
+  if (indexNotFound.value) return
+  const idx = wantedIndex.value
+  await store.fetchBasalCoastline(idx)
+}
+
 onMounted(async () => {
   // Fetch in parallel instead of sequentially for faster initial load
   await Promise.all([
@@ -307,20 +425,38 @@ onMounted(async () => {
   ])
 
   if (!indexNotFound.value) {
-    await fetchNow()
+    await Promise.all([
+      fetchNow(),
+      fetchBasalNow()
+    ])
   }
   await nextTick()
   renderChart()
+  renderBasalChart()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('resize', handleBasalResize)
   disposeChart()
+  disposeBasalChart()
 })
+
+// Debounced render for basal chart
+const debouncedRenderBasal = debounce(() => {
+  if (basalReady.value) {
+    nextTick().then(renderBasalChart)
+  }
+}, 100)
 
 // Re-render when data changes (debounced for better performance)
 watch([chartReady, years, crossShore, altitudeByYear], debouncedRender, { 
   deep: false // Shallow watch is faster
+})
+
+// Re-render basal chart when data changes
+watch([basalReady, basalYears, basalCoastline], debouncedRenderBasal, {
+  deep: false
 })
 
 // Re-fetch & re-render on route change (different transect) - debounced
@@ -332,10 +468,14 @@ watch(() => route.params.transectNum, debounce(async () => {
     await store.fetchAlongshoreList()
   }
   if (!indexNotFound.value) {
-    await fetchNow()
+    await Promise.all([
+      fetchNow(),
+      fetchBasalNow()
+    ])
   }
   await nextTick()
   renderChart()
+  renderBasalChart()
 }, 150))
 </script>
 
@@ -344,7 +484,7 @@ watch(() => route.params.transectNum, debounce(async () => {
   display: flex;
   width: 100%;
   height: 100%;
-  min-height: 600px;
+  min-height: 1200px;
 }
 
 .chart-wrap {
@@ -352,6 +492,9 @@ watch(() => route.params.transectNum, debounce(async () => {
   min-width: 0;
   padding: 0 24px;
   overflow: visible;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .chart {
