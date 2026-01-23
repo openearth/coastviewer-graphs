@@ -22,6 +22,9 @@ const WATER_URL
 // BKL_TKL_TND dataset for basal coastline
 const BKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/BKL_TKL_TND.nc.ascii'
 
+// MKL dataset for momentary coastline
+const MKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/MKL.nc.ascii'
+
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
@@ -278,17 +281,20 @@ function parseQuotedStringArray (payload) {
   return matches.map(s => s.replace(/^"/, '').replace(/"$/, '').trim())
 }
 
-// --- Parse basal coastline time series data ---
+// --- Parse coastline time series data (basal and testing) ---
 function parseBasalCoastlineAscii (ascii) {
-  // Extract time and basal_coastline blocks
+  // Extract time, basal_coastline, and testing_coastline blocks
   const timeBlock = capturePayloadBlock(ascii, 'time')
   const basalBlock = capturePayloadBlock(ascii, 'basal_coastline')
+  const testingBlock = capturePayloadBlock(ascii, 'testing_coastline')
 
-  // Clean out index tags from basal_coastline payload
+  // Clean out index tags from payloads
   const cleanBasalBlock = stripOpendapIndices(basalBlock)
+  const cleanTestingBlock = stripOpendapIndices(testingBlock)
 
   const timeValues = tokenizeNumbers(timeBlock)
   const basalValues = tokenizeNumbersKeepNaN(cleanBasalBlock)
+  const testingValues = cleanTestingBlock ? tokenizeNumbersKeepNaN(cleanTestingBlock) : []
 
   if (timeValues.length === 0 || basalValues.length === 0) {
     const head = (ascii || '').slice(0, 500)
@@ -303,6 +309,9 @@ function parseBasalCoastlineAscii (ascii) {
 
   // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
   const processedBasal = basalValues.map(v => (v === -9999 ? null : v))
+  const processedTesting = testingValues.length > 0
+    ? testingValues.map(v => (v === -9999 ? null : v))
+    : []
 
   // Create data points: [year, basal_coastline_value]
   const dataPoints = years.map((year, i) => [year, processedBasal[i]])
@@ -310,7 +319,40 @@ function parseBasalCoastlineAscii (ascii) {
   return {
     years,
     basalCoastline: processedBasal,
+    testingCoastline: processedTesting,
     dataPoints,
+  }
+}
+
+// --- Parse momentary coastline time series data ---
+function parseMomentaryCoastlineAscii (ascii) {
+  // Extract time and momentary_coastline blocks
+  const timeBlock = capturePayloadBlock(ascii, 'time')
+  const momentaryBlock = capturePayloadBlock(ascii, 'momentary_coastline')
+
+  // Clean out index tags from momentary_coastline payload
+  const cleanMomentaryBlock = stripOpendapIndices(momentaryBlock)
+
+  const timeValues = tokenizeNumbers(timeBlock)
+  const momentaryValues = tokenizeNumbersKeepNaN(cleanMomentaryBlock)
+
+  if (timeValues.length === 0 || momentaryValues.length === 0) {
+    const head = (ascii || '').slice(0, 500)
+    throw new Error(
+      'Could not parse time/momentary_coastline arrays from payload. '
+      + 'Response (first 500 chars):\n' + head,
+    )
+  }
+
+  // Convert time to year labels
+  const years = toYearLabels(timeValues)
+
+  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
+  const processedMomentary = momentaryValues.map(v => (v === -9999 ? null : v))
+
+  return {
+    years,
+    momentaryCoastline: processedMomentary,
   }
 }
 
@@ -366,13 +408,23 @@ export const useAppStore = defineStore('app', {
     basalError: null,
     basalYears: [],
     basalCoastline: [],
+    testingCoastline: [],
     basalDataPoints: [],
     basalReady: false,
     basalFetchedAt: null,
 
+    // Momentary coastline time series data
+    loadingMomentary: false,
+    momentaryError: null,
+    momentaryYears: [],
+    momentaryCoastline: [],
+    momentaryReady: false,
+    momentaryFetchedAt: null,
+
     // fetch cancellation
     _aborter: null,
     _basalAborter: null,
+    _momentaryAborter: null,
   }),
 
   actions: {
@@ -633,8 +685,8 @@ export const useAppStore = defineStore('app', {
         return
       }
 
-      // Build URL: time[0:1:63], basal_coastline[0:1:63][transectIndex]
-      const url = `${BKL_BASE_URL}?time[0:1:63],basal_coastline[0:1:63][${transectIndex}]`
+      // Build URL: time[0:1:63], basal_coastline[0:1:63][transectIndex], testing_coastline[0:1:63][transectIndex]
+      const url = `${BKL_BASE_URL}?time[0:1:63],basal_coastline[0:1:63][${transectIndex}],testing_coastline[0:1:63][${transectIndex}]`
 
       // Check cache first
       const cacheKey = `bkl_cache::${url}`
@@ -647,6 +699,7 @@ export const useAppStore = defineStore('app', {
             const parsed = parseBasalCoastlineAscii(text)
             this.basalYears = parsed.years
             this.basalCoastline = parsed.basalCoastline
+            this.testingCoastline = parsed.testingCoastline
             this.basalDataPoints = parsed.dataPoints
             this.basalReady = true
             this.basalFetchedAt = obj.t || null
@@ -677,6 +730,7 @@ export const useAppStore = defineStore('app', {
       this.basalReady = false
       this.basalYears = []
       this.basalCoastline = []
+      this.testingCoastline = []
       this.basalDataPoints = []
 
       try {
@@ -691,6 +745,7 @@ export const useAppStore = defineStore('app', {
         const parsed = parseBasalCoastlineAscii(text)
         this.basalYears = parsed.years
         this.basalCoastline = parsed.basalCoastline
+        this.testingCoastline = parsed.testingCoastline
         this.basalDataPoints = parsed.dataPoints
         this.basalReady = true
 
@@ -718,6 +773,116 @@ export const useAppStore = defineStore('app', {
 
     // Background cache refresh for basal coastline
     async _refreshBasalCacheInBackground (url, cacheKey) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' })
+        if (res.ok) {
+          const text = await res.text()
+          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify({
+                t: Date.now(),
+                data: text,
+              }))
+            } catch {
+              // Silent fail
+            }
+          }
+        }
+      } catch {
+        // Silent fail for background refresh
+      }
+    },
+
+    // --- Momentary coastline time series fetch ---
+    async fetchMomentaryCoastline (transectIndex) {
+      if (transectIndex < 0 || transectIndex >= 2465) {
+        this.momentaryError = 'Invalid transect index'
+        return
+      }
+
+      // Build URL: time[0:1:59], momentary_coastline[0:1:59][transectIndex]
+      // Note: MKL dataset has time[time = 60], so range is [0:1:59]
+      const url = `${MKL_BASE_URL}?time[0:1:59],momentary_coastline[0:1:59][${transectIndex}]`
+
+      // Check cache first
+      const cacheKey = `mkl_cache::${url}`
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const text = obj.data || ''
+          if (text) {
+            const parsed = parseMomentaryCoastlineAscii(text)
+            this.momentaryYears = parsed.years
+            this.momentaryCoastline = parsed.momentaryCoastline
+            this.momentaryReady = true
+            this.momentaryFetchedAt = obj.t || null
+            this.momentaryError = null
+            this.loadingMomentary = false
+
+            // Refresh cache in background
+            this._refreshMomentaryCacheInBackground(url, cacheKey)
+            return
+          }
+        } catch (error) {
+          console.warn('Momentary cache parse error, fetching fresh:', error)
+        }
+      }
+
+      // Cancel any in-flight request
+      if (this._momentaryAborter) {
+        try {
+          this._momentaryAborter.abort()
+        } catch {
+          // Silent abort error
+        }
+      }
+      this._momentaryAborter = new AbortController()
+
+      this.loadingMomentary = true
+      this.momentaryError = null
+      this.momentaryReady = false
+      this.momentaryYears = []
+      this.momentaryCoastline = []
+
+      try {
+        const res = await fetch(url, { cache: 'no-store', signal: this._momentaryAborter.signal })
+        if (!res.ok) {
+          throw new Error(`Failed to fetch momentary coastline data (${res.status})`)
+        }
+        const text = await res.text()
+        this.momentaryFetchedAt = Date.now()
+
+        // Parse the data
+        const parsed = parseMomentaryCoastlineAscii(text)
+        this.momentaryYears = parsed.years
+        this.momentaryCoastline = parsed.momentaryCoastline
+        this.momentaryReady = true
+
+        // Cache if reasonably small
+        if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify({
+              t: this.momentaryFetchedAt,
+              data: text,
+            }))
+          } catch {
+            // Cache too large or storage full
+          }
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          // Silent abort
+        } else {
+          this.momentaryError = error?.message || String(error)
+        }
+      } finally {
+        this.loadingMomentary = false
+      }
+    },
+
+    // Background cache refresh for momentary coastline
+    async _refreshMomentaryCacheInBackground (url, cacheKey) {
       try {
         const res = await fetch(url, { cache: 'no-store' })
         if (res.ok) {

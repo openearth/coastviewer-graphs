@@ -44,7 +44,13 @@ const altitudeByYear = computed(() => store.altitudeByYear)
 const basalReady = computed(() => store.basalReady)
 const basalYears = computed(() => store.basalYears)
 const basalCoastline = computed(() => store.basalCoastline)
+const testingCoastline = computed(() => store.testingCoastline)
 const basalDataPoints = computed(() => store.basalDataPoints)
+
+// Momentary coastline data
+const momentaryReady = computed(() => store.momentaryReady)
+const momentaryYears = computed(() => store.momentaryYears)
+const momentaryCoastline = computed(() => store.momentaryCoastline)
 
 // Current transect number from route (fallback to default)
 const currentTransectNum = computed(() => {
@@ -269,7 +275,7 @@ function renderChart () {
         selectorPosition: 'start',
       },
       grid: {
-        top: 142,
+        top: 172,
         right: 72,
         bottom: 96,
         left: 72,
@@ -314,18 +320,20 @@ function renderBasalChart () {
     }
 
     const years = basalYears.value || []
-    const values = basalCoastline.value || []
+    const basalValues = basalCoastline.value || []
+    const testingValues = testingCoastline.value || []
+    const momentaryValues = momentaryCoastline.value || []
 
-    if (years.length === 0 || values.length === 0) {
+    if (years.length === 0 || basalValues.length === 0) {
       return
     }
 
     const option = {
       animation: true,
       title: {
-        text: 'Basal Coastline Over Time',
+        text: 'Coastline Over Time',
         left: 'center',
-        top: 8,
+        top: 0,
         textStyle: {
           fontSize: 20,
           fontWeight: '600',
@@ -336,19 +344,31 @@ function renderBasalChart () {
         axisPointer: { type: 'line' },
         formatter: (params) => {
           const arr = Array.isArray(params) ? params : [params]
-          if (arr.length === 0) return ''
-          const p = arr[0]
-          const year = p.axisValue
-          const value = p.value
-          if (value == null || !Number.isFinite(value)) return ''
-          return `<b>Year: ${year}</b><br/>Basal Coastline: ${value} m`
+          const valid = arr.filter(p => {
+            const value = p.value
+            return value != null && Number.isFinite(value)
+          })
+          if (valid.length === 0) return ''
+          const year = valid[0].axisValue
+          const header = `<b>Year: ${year}</b>`
+          const lines = valid.map(p => {
+            const value = p.value
+            const marker = p.marker || ''
+            return `${marker}${p.seriesName}: ${value} m`
+          })
+          return [header, ...lines].join('<br/>')
         },
         showDelay: 0,
         hideDelay: 50,
         confine: true,
       },
+      legend: {
+        top: 32,
+        selector: [{ title: 'All' }],
+        selectorPosition: 'start',
+      },
       grid: {
-        top: 60,
+        top: 80,
         right: 40,
         bottom: 60,
         left: 70,
@@ -372,9 +392,9 @@ function renderBasalChart () {
       },
       series: [
         {
-          name: 'Basal Coastline',
+          name: 'Basiskustlijn (BKL)',
           type: 'line',
-          data: values,
+          data: basalValues,
           showSymbol: true,
           symbol: 'circle',
           symbolSize: 6,
@@ -383,7 +403,37 @@ function renderBasalChart () {
             width: 0, // Hide the line, show only dots
           },
           itemStyle: {
-            color: '#9C27B0',
+            color: '#9C27B0', // Purple
+          },
+        },
+        {
+          name: 'Toetsing Kustlijn (TKL)',
+          type: 'line',
+          data: testingValues.length > 0 ? testingValues : [],
+          showSymbol: true,
+          symbol: 'circle',
+          symbolSize: 6,
+          connectNulls: false,
+          lineStyle: {
+            width: 0, // Hide the line, show only dots
+          },
+          itemStyle: {
+            color: '#4CAF50', // Green
+          },
+        },
+        {
+          name: 'Momentane Kustlijn (MKL)',
+          type: 'line',
+          data: momentaryValues.length > 0 ? momentaryValues : [],
+          showSymbol: true,
+          symbol: 'circle',
+          symbolSize: 6,
+          connectNulls: false,
+          lineStyle: {
+            width: 0, // Hide the line, show only dots
+          },
+          itemStyle: {
+            color: '#2196F3', // Blue
           },
         },
       ],
@@ -417,6 +467,12 @@ async function fetchBasalNow () {
   await store.fetchBasalCoastline(idx)
 }
 
+async function fetchMomentaryNow () {
+  if (indexNotFound.value) return
+  const idx = wantedIndex.value
+  await store.fetchMomentaryCoastline(idx)
+}
+
 onMounted(async () => {
   // Fetch in parallel instead of sequentially for faster initial load
   await Promise.all([
@@ -427,7 +483,8 @@ onMounted(async () => {
   if (!indexNotFound.value) {
     await Promise.all([
       fetchNow(),
-      fetchBasalNow()
+      fetchBasalNow(),
+      fetchMomentaryNow()
     ])
   }
   await nextTick()
@@ -455,7 +512,7 @@ watch([chartReady, years, crossShore, altitudeByYear], debouncedRender, {
 })
 
 // Re-render basal chart when data changes
-watch([basalReady, basalYears, basalCoastline], debouncedRenderBasal, {
+watch([basalReady, basalYears, basalCoastline, testingCoastline, momentaryReady, momentaryCoastline], debouncedRenderBasal, {
   deep: false
 })
 
@@ -470,7 +527,8 @@ watch(() => route.params.transectNum, debounce(async () => {
   if (!indexNotFound.value) {
     await Promise.all([
       fetchNow(),
-      fetchBasalNow()
+      fetchBasalNow(),
+      fetchMomentaryNow()
     ])
   }
   await nextTick()
