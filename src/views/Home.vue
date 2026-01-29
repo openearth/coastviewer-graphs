@@ -5,6 +5,7 @@
     <div class="chart-wrap">
       <div ref="chartRef" class="chart"></div>
       <div ref="basalChartRef" class="chart"></div>
+      <div ref="mhwChartRef" class="chart"></div>
     </div>
   </div>
 </template>
@@ -51,6 +52,12 @@ const basalDataPoints = computed(() => store.basalDataPoints)
 const momentaryReady = computed(() => store.momentaryReady)
 const momentaryYears = computed(() => store.momentaryYears)
 const momentaryCoastline = computed(() => store.momentaryCoastline)
+
+// Mean high/low water cross data
+const mhwReady = computed(() => store.mhwReady)
+const mhwYears = computed(() => store.mhwYears)
+const meanHighWaterCross = computed(() => store.meanHighWaterCross)
+const meanLowWaterCross = computed(() => store.meanLowWaterCross)
 
 // Current transect number from route (fallback to default)
 const currentTransectNum = computed(() => {
@@ -108,6 +115,9 @@ let chart = null
 const basalChartRef = ref(null)
 let basalChart = null
 
+const mhwChartRef = ref(null)
+let mhwChart = null
+
 function disposeChart () {
   if (chart) {
     chart.dispose()
@@ -119,6 +129,13 @@ function disposeBasalChart () {
   if (basalChart) {
     basalChart.dispose()
     basalChart = null
+  }
+}
+
+function disposeMhwChart () {
+  if (mhwChart) {
+    mhwChart.dispose()
+    mhwChart = null
   }
 }
 
@@ -311,6 +328,19 @@ function renderChart () {
   }
 }
 
+// Helper function to find first valid (non-null, non-NaN) index across multiple series
+function findFirstValidIndex (...seriesArrays) {
+  const maxLength = Math.max(...seriesArrays.map(arr => arr?.length || 0))
+  for (let i = 0; i < maxLength; i++) {
+    for (const series of seriesArrays) {
+      if (series && series[i] != null && Number.isFinite(series[i])) {
+        return i
+      }
+    }
+  }
+  return 0 // Default to start if no valid values found
+}
+
 function renderBasalChart () {
   try {
     if (!basalChartRef.value) return
@@ -327,6 +357,15 @@ function renderBasalChart () {
     if (years.length === 0 || basalValues.length === 0) {
       return
     }
+
+    // Find first valid index across all series
+    const firstValidIndex = findFirstValidIndex(basalValues, testingValues, momentaryValues)
+
+    // Slice arrays from first valid index
+    const slicedYears = years.slice(firstValidIndex)
+    const slicedBasalValues = basalValues.slice(firstValidIndex)
+    const slicedTestingValues = testingValues.length > 0 ? testingValues.slice(firstValidIndex) : []
+    const slicedMomentaryValues = momentaryValues.length > 0 ? momentaryValues.slice(firstValidIndex) : []
 
     const option = {
       animation: true,
@@ -379,7 +418,7 @@ function renderBasalChart () {
         name: 'Year',
         nameLocation: 'middle',
         nameGap: 30,
-        data: years,
+        data: slicedYears,
         axisLabel: {
           rotate: 45,
         },
@@ -394,7 +433,7 @@ function renderBasalChart () {
         {
           name: 'Basiskustlijn (BKL)',
           type: 'line',
-          data: basalValues,
+          data: slicedBasalValues,
           showSymbol: true,
           symbol: 'circle',
           symbolSize: 6,
@@ -409,7 +448,7 @@ function renderBasalChart () {
         {
           name: 'Toetsing Kustlijn (TKL)',
           type: 'line',
-          data: testingValues.length > 0 ? testingValues : [],
+          data: slicedTestingValues.length > 0 ? slicedTestingValues : [],
           showSymbol: true,
           symbol: 'circle',
           symbolSize: 6,
@@ -424,7 +463,7 @@ function renderBasalChart () {
         {
           name: 'Momentane Kustlijn (MKL)',
           type: 'line',
-          data: momentaryValues.length > 0 ? momentaryValues : [],
+          data: slicedMomentaryValues.length > 0 ? slicedMomentaryValues : [],
           showSymbol: true,
           symbol: 'circle',
           symbolSize: 6,
@@ -445,13 +484,144 @@ function renderBasalChart () {
   }
 }
 
+function renderMhwChart () {
+  try {
+    if (!mhwChartRef.value) return
+    if (!mhwChart) {
+      mhwChart = echarts.init(mhwChartRef.value, undefined, { renderer: 'canvas' })
+      window.addEventListener('resize', handleMhwResize)
+    }
+
+    const years = mhwYears.value || []
+    const mhwValues = meanHighWaterCross.value || []
+    const mlwValues = meanLowWaterCross.value || []
+
+    if (years.length === 0 || mhwValues.length === 0) {
+      return
+    }
+
+    // Find first valid index across both series
+    const firstValidIndex = findFirstValidIndex(mhwValues, mlwValues)
+
+    // Slice arrays from first valid index
+    const slicedYears = years.slice(firstValidIndex)
+    const slicedMhwValues = mhwValues.slice(firstValidIndex)
+    const slicedMlwValues = mlwValues.length > 0 ? mlwValues.slice(firstValidIndex) : []
+
+    const option = {
+      animation: true,
+      title: {
+        text: 'Cross shore distance [m]',
+        left: 'center',
+        top: 0,
+        textStyle: {
+          fontSize: 20,
+          fontWeight: '600',
+        },
+      },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'line' },
+        formatter: (params) => {
+          const arr = Array.isArray(params) ? params : [params]
+          const valid = arr.filter(p => {
+            const value = p.value
+            return value != null && Number.isFinite(value)
+          })
+          if (valid.length === 0) return ''
+          const year = valid[0].axisValue
+          const header = `<b>Year: ${year}</b>`
+          const lines = valid.map(p => {
+            const value = p.value
+            const marker = p.marker || ''
+            return `${marker}${p.seriesName}: ${value} m`
+          })
+          return [header, ...lines].join('<br/>')
+        },
+        showDelay: 0,
+        hideDelay: 50,
+        confine: true,
+      },
+      legend: {
+        top: 32,
+        selector: [{ title: 'All' }],
+        selectorPosition: 'start',
+      },
+      grid: {
+        top: 80,
+        right: 40,
+        bottom: 60,
+        left: 70,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        name: 'Year',
+        nameLocation: 'middle',
+        nameGap: 30,
+        data: slicedYears,
+        axisLabel: {
+          rotate: 45,
+        },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Cross-shore distance (m)',
+        nameLocation: 'middle',
+        nameGap: 50,
+      },
+      series: [
+        {
+          name: 'Mean High Water',
+          type: 'line',
+          data: slicedMhwValues,
+          showSymbol: true,
+          symbol: 'circle',
+          symbolSize: 6,
+          connectNulls: false,
+          lineStyle: {
+            width: 0, // Hide the line, show only dots
+          },
+          itemStyle: {
+            color: '#F44336', // Red
+          },
+        },
+        {
+          name: 'Mean Low Water',
+          type: 'line',
+          data: slicedMlwValues.length > 0 ? slicedMlwValues : [],
+          showSymbol: true,
+          symbol: 'circle',
+          symbolSize: 6,
+          connectNulls: false,
+          lineStyle: {
+            width: 0, // Hide the line, show only dots
+          },
+          itemStyle: {
+            color: '#2196F3', // Blue
+          },
+        },
+      ],
+    }
+
+    mhwChart.setOption(option, true)
+  } catch (e) {
+    console.error('MHW chart render error:', e)
+  }
+}
+
 function handleResize () {
   if (chart) chart.resize()
   if (basalChart) basalChart.resize()
+  if (mhwChart) mhwChart.resize()
 }
 
 function handleBasalResize () {
   if (basalChart) basalChart.resize()
+}
+
+function handleMhwResize () {
+  if (mhwChart) mhwChart.resize()
 }
 
 // Debounced render function for better performance
@@ -473,6 +643,12 @@ async function fetchMomentaryNow () {
   await store.fetchMomentaryCoastline(idx)
 }
 
+async function fetchMhwNow () {
+  if (indexNotFound.value) return
+  const idx = wantedIndex.value
+  await store.fetchMeanHighWaterCross(idx)
+}
+
 onMounted(async () => {
   // Fetch in parallel instead of sequentially for faster initial load
   await Promise.all([
@@ -484,19 +660,23 @@ onMounted(async () => {
     await Promise.all([
       fetchNow(),
       fetchBasalNow(),
-      fetchMomentaryNow()
+      fetchMomentaryNow(),
+      fetchMhwNow()
     ])
   }
   await nextTick()
   renderChart()
   renderBasalChart()
+  renderMhwChart()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('resize', handleBasalResize)
+  window.removeEventListener('resize', handleMhwResize)
   disposeChart()
   disposeBasalChart()
+  disposeMhwChart()
 })
 
 // Debounced render for basal chart
@@ -511,8 +691,20 @@ watch([chartReady, years, crossShore, altitudeByYear], debouncedRender, {
   deep: false // Shallow watch is faster
 })
 
+// Debounced render for MHW chart
+const debouncedRenderMhw = debounce(() => {
+  if (mhwReady.value) {
+    nextTick().then(renderMhwChart)
+  }
+}, 100)
+
 // Re-render basal chart when data changes
 watch([basalReady, basalYears, basalCoastline, testingCoastline, momentaryReady, momentaryCoastline], debouncedRenderBasal, {
+  deep: false
+})
+
+// Re-render MHW chart when data changes
+watch([mhwReady, mhwYears, meanHighWaterCross, meanLowWaterCross], debouncedRenderMhw, {
   deep: false
 })
 
@@ -528,12 +720,14 @@ watch(() => route.params.transectNum, debounce(async () => {
     await Promise.all([
       fetchNow(),
       fetchBasalNow(),
-      fetchMomentaryNow()
+      fetchMomentaryNow(),
+      fetchMhwNow()
     ])
   }
   await nextTick()
   renderChart()
   renderBasalChart()
+  renderMhwChart()
 }, 150))
 </script>
 
@@ -542,7 +736,7 @@ watch(() => route.params.transectNum, debounce(async () => {
   display: flex;
   width: 100%;
   height: 100%;
-  min-height: 1200px;
+  min-height: 1800px;
 }
 
 .chart-wrap {

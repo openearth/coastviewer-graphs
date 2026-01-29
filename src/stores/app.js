@@ -25,6 +25,9 @@ const BKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswat
 // MKL dataset for momentary coastline
 const MKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/MKL.nc.ascii'
 
+// MHW_MLW dataset for mean high/low water
+const MHW_MLW_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/MHW_MLW/MHW_MLW.nc.ascii'
+
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
@@ -356,6 +359,45 @@ function parseMomentaryCoastlineAscii (ascii) {
   }
 }
 
+// --- Parse mean high/low water cross time series data ---
+function parseMeanHighWaterCrossAscii (ascii) {
+  // Extract time, mean_high_water_cross, and mean_low_water_cross blocks
+  const timeBlock = capturePayloadBlock(ascii, 'time')
+  const mhwBlock = capturePayloadBlock(ascii, 'mean_high_water_cross')
+  const mlwBlock = capturePayloadBlock(ascii, 'mean_low_water_cross')
+
+  // Clean out index tags from payloads
+  const cleanMhwBlock = stripOpendapIndices(mhwBlock)
+  const cleanMlwBlock = stripOpendapIndices(mlwBlock)
+
+  const timeValues = tokenizeNumbers(timeBlock)
+  const mhwValues = tokenizeNumbersKeepNaN(cleanMhwBlock)
+  const mlwValues = cleanMlwBlock ? tokenizeNumbersKeepNaN(cleanMlwBlock) : []
+
+  if (timeValues.length === 0 || mhwValues.length === 0) {
+    const head = (ascii || '').slice(0, 500)
+    throw new Error(
+      'Could not parse time/mean_high_water_cross arrays from payload. '
+      + 'Response (first 500 chars):\n' + head,
+    )
+  }
+
+  // Convert time to year labels
+  const years = toYearLabels(timeValues)
+
+  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
+  const processedMhw = mhwValues.map(v => (v === -9999 ? null : v))
+  const processedMlw = mlwValues.length > 0
+    ? mlwValues.map(v => (v === -9999 ? null : v))
+    : []
+
+  return {
+    years,
+    meanHighWaterCross: processedMhw,
+    meanLowWaterCross: processedMlw,
+  }
+}
+
 export const useAppStore = defineStore('app', {
   state: () => ({
     // data fetch
@@ -421,10 +463,20 @@ export const useAppStore = defineStore('app', {
     momentaryReady: false,
     momentaryFetchedAt: null,
 
+    // Mean high/low water cross time series data
+    loadingMhw: false,
+    mhwError: null,
+    mhwYears: [],
+    meanHighWaterCross: [],
+    meanLowWaterCross: [],
+    mhwReady: false,
+    mhwFetchedAt: null,
+
     // fetch cancellation
     _aborter: null,
     _basalAborter: null,
     _momentaryAborter: null,
+    _mhwAborter: null,
   }),
 
   actions: {
@@ -883,6 +935,119 @@ export const useAppStore = defineStore('app', {
 
     // Background cache refresh for momentary coastline
     async _refreshMomentaryCacheInBackground (url, cacheKey) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' })
+        if (res.ok) {
+          const text = await res.text()
+          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify({
+                t: Date.now(),
+                data: text,
+              }))
+            } catch {
+              // Silent fail
+            }
+          }
+        }
+      } catch {
+        // Silent fail for background refresh
+      }
+    },
+
+    // --- Mean high water cross time series fetch ---
+    async fetchMeanHighWaterCross (transectIndex) {
+      if (transectIndex < 0 || transectIndex >= 2465) {
+        this.mhwError = 'Invalid transect index'
+        return
+      }
+
+      // Build URL: time[0:1:182], mean_high_water_cross[0:1:182][transectIndex], mean_low_water_cross[0:1:182][transectIndex]
+      // Note: MHW_MLW dataset has time[time = 183], so range is [0:1:182]
+      const url = `${MHW_MLW_BASE_URL}?time[0:1:182],mean_high_water_cross[0:1:182][${transectIndex}],mean_low_water_cross[0:1:182][${transectIndex}]`
+
+      // Check cache first
+      const cacheKey = `mhw_cache::${url}`
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const text = obj.data || ''
+          if (text) {
+            const parsed = parseMeanHighWaterCrossAscii(text)
+            this.mhwYears = parsed.years
+            this.meanHighWaterCross = parsed.meanHighWaterCross
+            this.meanLowWaterCross = parsed.meanLowWaterCross
+            this.mhwReady = true
+            this.mhwFetchedAt = obj.t || null
+            this.mhwError = null
+            this.loadingMhw = false
+
+            // Refresh cache in background
+            this._refreshMhwCacheInBackground(url, cacheKey)
+            return
+          }
+        } catch (error) {
+          console.warn('MHW cache parse error, fetching fresh:', error)
+        }
+      }
+
+      // Cancel any in-flight request
+      if (this._mhwAborter) {
+        try {
+          this._mhwAborter.abort()
+        } catch {
+          // Silent abort error
+        }
+      }
+      this._mhwAborter = new AbortController()
+
+      this.loadingMhw = true
+      this.mhwError = null
+      this.mhwReady = false
+      this.mhwYears = []
+      this.meanHighWaterCross = []
+      this.meanLowWaterCross = []
+
+      try {
+        const res = await fetch(url, { cache: 'no-store', signal: this._mhwAborter.signal })
+        if (!res.ok) {
+          throw new Error(`Failed to fetch mean high water cross data (${res.status})`)
+        }
+        const text = await res.text()
+        this.mhwFetchedAt = Date.now()
+
+        // Parse the data
+        const parsed = parseMeanHighWaterCrossAscii(text)
+        this.mhwYears = parsed.years
+        this.meanHighWaterCross = parsed.meanHighWaterCross
+        this.meanLowWaterCross = parsed.meanLowWaterCross
+        this.mhwReady = true
+
+        // Cache if reasonably small
+        if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify({
+              t: this.mhwFetchedAt,
+              data: text,
+            }))
+          } catch {
+            // Cache too large or storage full
+          }
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          // Silent abort
+        } else {
+          this.mhwError = error?.message || String(error)
+        }
+      } finally {
+        this.loadingMhw = false
+      }
+    },
+
+    // Background cache refresh for mean high water cross
+    async _refreshMhwCacheInBackground (url, cacheKey) {
       try {
         const res = await fetch(url, { cache: 'no-store' })
         if (res.ok) {
