@@ -28,6 +28,9 @@ const MKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswat
 // MHW_MLW dataset for mean high/low water
 const MHW_MLW_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/MHW_MLW/MHW_MLW.nc.ascii'
 
+// DuneFoot dataset for dune foot
+const DF_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/DuneFoot/DF.nc.ascii'
+
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
@@ -398,6 +401,38 @@ function parseMeanHighWaterCrossAscii (ascii) {
   }
 }
 
+// --- Parse dune foot threeNAP cross time series data ---
+function parseDuneFootThreeNAPCrossAscii (ascii) {
+  // Extract time and dune_foot_threeNAP_cross blocks
+  const timeBlock = capturePayloadBlock(ascii, 'time')
+  const dfBlock = capturePayloadBlock(ascii, 'dune_foot_threeNAP_cross')
+
+  // Clean out index tags from dune_foot_threeNAP_cross payload
+  const cleanDfBlock = stripOpendapIndices(dfBlock)
+
+  const timeValues = tokenizeNumbers(timeBlock)
+  const dfValues = tokenizeNumbersKeepNaN(cleanDfBlock)
+
+  if (timeValues.length === 0 || dfValues.length === 0) {
+    const head = (ascii || '').slice(0, 500)
+    throw new Error(
+      'Could not parse time/dune_foot_threeNAP_cross arrays from payload. '
+      + 'Response (first 500 chars):\n' + head,
+    )
+  }
+
+  // Convert time to year labels
+  const years = toYearLabels(timeValues)
+
+  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
+  const processedDf = dfValues.map(v => (v === -9999 ? null : v))
+
+  return {
+    years,
+    duneFootThreeNAPCross: processedDf,
+  }
+}
+
 export const useAppStore = defineStore('app', {
   state: () => ({
     // data fetch
@@ -472,11 +507,20 @@ export const useAppStore = defineStore('app', {
     mhwReady: false,
     mhwFetchedAt: null,
 
+    // Dune foot threeNAP cross time series data
+    loadingDf: false,
+    dfError: null,
+    dfYears: [],
+    duneFootThreeNAPCross: [],
+    dfReady: false,
+    dfFetchedAt: null,
+
     // fetch cancellation
     _aborter: null,
     _basalAborter: null,
     _momentaryAborter: null,
     _mhwAborter: null,
+    _dfAborter: null,
   }),
 
   actions: {
@@ -1048,6 +1092,116 @@ export const useAppStore = defineStore('app', {
 
     // Background cache refresh for mean high water cross
     async _refreshMhwCacheInBackground (url, cacheKey) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' })
+        if (res.ok) {
+          const text = await res.text()
+          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify({
+                t: Date.now(),
+                data: text,
+              }))
+            } catch {
+              // Silent fail
+            }
+          }
+        }
+      } catch {
+        // Silent fail for background refresh
+      }
+    },
+
+    // --- Dune foot threeNAP cross time series fetch ---
+    async fetchDuneFootThreeNAPCross (transectIndex) {
+      if (transectIndex < 0 || transectIndex >= 2465) {
+        this.dfError = 'Invalid transect index'
+        return
+      }
+
+      // Build URL: time[0:1:181], dune_foot_threeNAP_cross[0:1:181][transectIndex]
+      // Note: DF dataset has time[time = 182], so range is [0:1:181]
+      const url = `${DF_BASE_URL}?time[0:1:181],dune_foot_threeNAP_cross[0:1:181][${transectIndex}]`
+
+      // Check cache first
+      const cacheKey = `df_cache::${url}`
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const text = obj.data || ''
+          if (text) {
+            const parsed = parseDuneFootThreeNAPCrossAscii(text)
+            this.dfYears = parsed.years
+            this.duneFootThreeNAPCross = parsed.duneFootThreeNAPCross
+            this.dfReady = true
+            this.dfFetchedAt = obj.t || null
+            this.dfError = null
+            this.loadingDf = false
+
+            // Refresh cache in background
+            this._refreshDfCacheInBackground(url, cacheKey)
+            return
+          }
+        } catch (error) {
+          console.warn('DF cache parse error, fetching fresh:', error)
+        }
+      }
+
+      // Cancel any in-flight request
+      if (this._dfAborter) {
+        try {
+          this._dfAborter.abort()
+        } catch {
+          // Silent abort error
+        }
+      }
+      this._dfAborter = new AbortController()
+
+      this.loadingDf = true
+      this.dfError = null
+      this.dfReady = false
+      this.dfYears = []
+      this.duneFootThreeNAPCross = []
+
+      try {
+        const res = await fetch(url, { cache: 'no-store', signal: this._dfAborter.signal })
+        if (!res.ok) {
+          throw new Error(`Failed to fetch dune foot threeNAP cross data (${res.status})`)
+        }
+        const text = await res.text()
+        this.dfFetchedAt = Date.now()
+
+        // Parse the data
+        const parsed = parseDuneFootThreeNAPCrossAscii(text)
+        this.dfYears = parsed.years
+        this.duneFootThreeNAPCross = parsed.duneFootThreeNAPCross
+        this.dfReady = true
+
+        // Cache if reasonably small
+        if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify({
+              t: this.dfFetchedAt,
+              data: text,
+            }))
+          } catch {
+            // Cache too large or storage full
+          }
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          // Silent abort
+        } else {
+          this.dfError = error?.message || String(error)
+        }
+      } finally {
+        this.loadingDf = false
+      }
+    },
+
+    // Background cache refresh for dune foot threeNAP cross
+    async _refreshDfCacheInBackground (url, cacheKey) {
       try {
         const res = await fetch(url, { cache: 'no-store' })
         if (res.ok) {

@@ -59,6 +59,11 @@ const mhwYears = computed(() => store.mhwYears)
 const meanHighWaterCross = computed(() => store.meanHighWaterCross)
 const meanLowWaterCross = computed(() => store.meanLowWaterCross)
 
+// Dune foot threeNAP cross data
+const dfReady = computed(() => store.dfReady)
+const dfYears = computed(() => store.dfYears)
+const duneFootThreeNAPCross = computed(() => store.duneFootThreeNAPCross)
+
 // Current transect number from route (fallback to default)
 const currentTransectNum = computed(() => {
   const raw = route.params.transectNum
@@ -500,13 +505,16 @@ function renderMhwChart () {
       return
     }
 
-    // Find first valid index across both series
-    const firstValidIndex = findFirstValidIndex(mhwValues, mlwValues)
+    const dfValues = duneFootThreeNAPCross.value || []
+
+    // Find first valid index across all series (including dune foot if available)
+    const firstValidIndex = findFirstValidIndex(mhwValues, mlwValues, dfValues)
 
     // Slice arrays from first valid index
     const slicedYears = years.slice(firstValidIndex)
     const slicedMhwValues = mhwValues.slice(firstValidIndex)
     const slicedMlwValues = mlwValues.length > 0 ? mlwValues.slice(firstValidIndex) : []
+    const slicedDfValues = dfValues.length > 0 ? dfValues.slice(firstValidIndex) : []
 
     const option = {
       animation: true,
@@ -601,6 +609,21 @@ function renderMhwChart () {
             color: '#2196F3', // Blue
           },
         },
+        {
+          name: 'Dune Foot 3NAP',
+          type: 'line',
+          data: slicedDfValues.length > 0 ? slicedDfValues : [],
+          showSymbol: true,
+          symbol: 'circle',
+          symbolSize: 6,
+          connectNulls: false,
+          lineStyle: {
+            width: 0, // Hide the line, show only dots
+          },
+          itemStyle: {
+            color: '#4CAF50', // Green
+          },
+        },
       ],
     }
 
@@ -649,6 +672,12 @@ async function fetchMhwNow () {
   await store.fetchMeanHighWaterCross(idx)
 }
 
+async function fetchDfNow () {
+  if (indexNotFound.value) return
+  const idx = wantedIndex.value
+  await store.fetchDuneFootThreeNAPCross(idx)
+}
+
 onMounted(async () => {
   // Fetch in parallel instead of sequentially for faster initial load
   await Promise.all([
@@ -661,7 +690,8 @@ onMounted(async () => {
       fetchNow(),
       fetchBasalNow(),
       fetchMomentaryNow(),
-      fetchMhwNow()
+      fetchMhwNow(),
+      fetchDfNow()
     ])
   }
   await nextTick()
@@ -704,7 +734,7 @@ watch([basalReady, basalYears, basalCoastline, testingCoastline, momentaryReady,
 })
 
 // Re-render MHW chart when data changes
-watch([mhwReady, mhwYears, meanHighWaterCross, meanLowWaterCross], debouncedRenderMhw, {
+watch([mhwReady, mhwYears, meanHighWaterCross, meanLowWaterCross, dfReady, duneFootThreeNAPCross], debouncedRenderMhw, {
   deep: false
 })
 
@@ -721,7 +751,8 @@ watch(() => route.params.transectNum, debounce(async () => {
       fetchNow(),
       fetchBasalNow(),
       fetchMomentaryNow(),
-      fetchMhwNow()
+      fetchMhwNow(),
+      fetchDfNow()
     ])
   }
   await nextTick()
