@@ -263,6 +263,12 @@ watch(() => route.params.transectNum, async () => {
   padding: 16px 12px;
   border-right: 1px solid rgba(0,0,0,0.08);
   background: #fafafa;
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  overflow-y: auto;
+  z-index: 100;
 }
 
 .panel__title {
