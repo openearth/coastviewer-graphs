@@ -280,12 +280,40 @@ function renderChart () {
           if (valid.length === 0) return ''
           const { x } = getXY(valid[0])
           const header = `<b>Cross-shore: ${x} m</b>`
-          const lines = valid.map(p => {
-            const { y } = getXY(p)
-            const marker = p.marker || ''
-            return `<b>${marker}${p.seriesName}</b>: ${y} m`
-          })
-          return [header, ...lines].join('<br/>')
+          
+          // Split into columns of 25 items each
+          const itemsPerColumn = 25
+          const columns = []
+          for (let i = 0; i < valid.length; i += itemsPerColumn) {
+            const column = valid.slice(i, i + itemsPerColumn)
+            const columnLines = column.map(p => {
+              const { y } = getXY(p)
+              const marker = p.marker || ''
+              return `<b>${marker}${p.seriesName}</b>: ${y} m`
+            })
+            columns.push(columnLines)
+          }
+          
+          // Format as columns using table
+          if (columns.length === 1) {
+            // Single column: simple format
+            return [header, ...columns[0]].join('<br/>')
+          } else {
+            // Multiple columns: use table layout
+            const maxRows = Math.max(...columns.map(col => col.length))
+            let tableRows = `<tr><td colspan="${columns.length}" style="padding-bottom: 8px; border-bottom: 1px solid #ddd;"><b>Cross-shore: ${x} m</b></td></tr>`
+            
+            for (let row = 0; row < maxRows; row++) {
+              tableRows += '<tr>'
+              for (let col = 0; col < columns.length; col++) {
+                const cell = columns[col][row] || ''
+                tableRows += `<td style="padding: 2px 12px; vertical-align: top;">${cell}</td>`
+              }
+              tableRows += '</tr>'
+            }
+            
+            return `<table style="border-collapse: collapse;">${tableRows}</table>`
+          }
         },
         showDelay: 0,
         hideDelay: 50,
