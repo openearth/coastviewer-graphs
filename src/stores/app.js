@@ -36,6 +36,7 @@ const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
 const RSP_CACHE_KEY = 'jarkus_rsp_v1' // NEW
 const WATER_CACHE_KEY = 'jarkus_water_v1' // NEW
+const TIME_DIMENSION_CACHE_KEY = 'jarkus_time_dimension_v1'
 
 // cache only if the text is smaller than this many chars (~bytes)
 const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
@@ -515,6 +516,11 @@ export const useAppStore = defineStore('app', {
     dfReady: false,
     dfFetchedAt: null,
 
+    // Time dimension size (for dynamic URL construction)
+    timeDimensionSize: null,
+    loadingTimeDimension: false,
+    timeDimensionError: null,
+
     // fetch cancellation
     _aborter: null,
     _basalAborter: null,
@@ -771,6 +777,111 @@ export const useAppStore = defineStore('app', {
         this.waterError = error?.message || String(error)
       } finally {
         this.loadingWater = false
+      }
+    },
+
+    // --- Fetch time dimension size for dynamic URL construction ---
+    async fetchTimeDimensionSize () {
+      // If already fetched in this session, return early
+      if (this.timeDimensionSize != null) {
+        return
+      }
+
+      // Check cache with expiration (24 hours = 86400000 ms)
+      const CACHE_EXPIRATION_MS = 24 * 60 * 60 * 1000 // 24 hours
+      const cached = localStorage.getItem(TIME_DIMENSION_CACHE_KEY)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const now = Date.now()
+          const cachedAt = obj.timestamp || 0
+          const age = now - cachedAt
+
+          if (typeof obj.size === 'number' && obj.size > 0 && age < CACHE_EXPIRATION_MS) {
+            // Cache is still valid
+            this.timeDimensionSize = obj.size
+            return
+          }
+          // Cache expired or invalid - continue to fetch fresh data
+        } catch {
+          // Ignore cache parse errors, continue to fetch fresh data
+        }
+      }
+
+      this.loadingTimeDimension = true
+      this.timeDimensionError = null
+
+      try {
+        // Query the DDS (Dataset Descriptor Structure) to get dimension metadata
+        // DDS contains dimension information like "time = 61;"
+        const baseUrl = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc'
+        const ddsUrl = `${baseUrl}.dds`
+
+        const res = await fetch(ddsUrl, { cache: 'no-store' })
+
+        if (!res.ok) {
+          const errorText = await res.text()
+          console.error('[fetchTimeDimensionSize] DDS Response error text:', errorText)
+          throw new Error(`Failed to fetch DDS (${res.status}): ${errorText}`)
+        }
+
+        const ddsText = await res.text()
+
+        // Parse DDS to find time dimension size
+        // Look for pattern like "Int32 time[time = 61];"
+        const timeDimMatch = ddsText.match(/time\s*\[time\s*=\s*(\d+)\s*\]/i)
+        if (timeDimMatch && timeDimMatch[1]) {
+          const size = Number.parseInt(timeDimMatch[1], 10)
+
+          if (size > 0) {
+            this.timeDimensionSize = size
+            // Cache the result with timestamp
+            localStorage.setItem(TIME_DIMENSION_CACHE_KEY, JSON.stringify({
+              size,
+              timestamp: Date.now(),
+            }))
+            return
+          }
+        }
+
+        // Fallback: try to extract from error message if DDS parsing fails
+        // Error messages sometimes contain "stop >= size: requested:actual"
+        throw new Error('Could not parse time dimension size from DDS')
+      } catch (error) {
+        // Try alternative: query with a reasonable range and parse error message
+        // The error message contains the actual size: "stop >= size: 9999:61"
+        try {
+          const baseUrl = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii'
+          const testUrl = `${baseUrl}?time[0:1:9999]`
+
+          const res = await fetch(testUrl, { cache: 'no-store' })
+          if (!res.ok) {
+            const errorText = await res.text()
+
+            // Parse error message: "stop >= size: 9999:61"
+            const sizeMatch = errorText.match(/stop\s*>=\s*size:\s*\d+:\s*(\d+)/i)
+            if (sizeMatch && sizeMatch[1]) {
+              const size = Number.parseInt(sizeMatch[1], 10)
+
+              if (size > 0) {
+                this.timeDimensionSize = size
+                localStorage.setItem(TIME_DIMENSION_CACHE_KEY, JSON.stringify({
+                  size,
+                  timestamp: Date.now(),
+                }))
+                return
+              }
+            }
+          }
+        } catch {
+          // Alternative method failed, will use fallback
+        }
+
+        this.timeDimensionError = error?.message || String(error)
+        // Fallback to default value if all methods fail
+        this.timeDimensionSize = 61
+      } finally {
+        this.loadingTimeDimension = false
       }
     },
 

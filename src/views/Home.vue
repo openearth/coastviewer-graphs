@@ -79,10 +79,15 @@ const wantedIndex = computed(() => {
 })
 const indexNotFound = computed(() => wantedIndex.value < 0)
 
+// Get time dimension size from store
+const timeDimensionSize = computed(() => store.timeDimensionSize || 61) // Fallback to 61 if not yet loaded
+
 const url = computed(() => {
   if (indexNotFound.value) return ''
   const idx = wantedIndex.value
-  return `https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?cross_shore[0:1:2462],time[0:1:59],altitude[0:1:59][${idx}][0:1:2462]`
+  const timeSize = timeDimensionSize.value
+  const timeMax = timeSize > 0 ? timeSize - 1 : 60 // Convert size to max index
+  return `https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?cross_shore[0:1:2462],time[0:1:${timeMax}],altitude[0:1:${timeMax}][${idx}][0:1:2462]`
 })
 
 async function fetchNow () {
@@ -708,10 +713,15 @@ async function fetchDfNow () {
 
 onMounted(async () => {
   // Fetch in parallel instead of sequentially for faster initial load
+  // Time dimension size must be fetched first for dynamic URL construction
   await Promise.all([
     store.fetchTransectIdList(),
-    store.fetchAlongshoreList()
+    store.fetchAlongshoreList(),
+    store.fetchTimeDimensionSize() // Fetch time dimension size for dynamic URL construction
   ])
+
+  // Wait a tick to ensure computed URL is updated with time dimension size
+  await nextTick()
 
   if (!indexNotFound.value) {
     await Promise.all([
