@@ -1,50 +1,61 @@
-// stores/app.js
-// Utilities
 import { defineStore } from 'pinia'
 
 const IDS_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?id[0:1:2464]'
-
-// Fetch alongshore, areacode and areaname in one round-trip each
 const ALONG_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?alongshore[0:1:2464]'
 const AREA_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?areacode[0:1:2464],areaname[0:1:2464]'
-
-// NEW: fetch rsp_x, rsp_y, rsp_lat, rsp_lon together
 const RSP_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?rsp_x[0:1:2464],rsp_y[0:1:2464],rsp_lat[0:1:2464],rsp_lon[0:1:2464]'
-
-// NEW: mean low/high water
 const WATER_URL
   = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?mean_high_water[0:1:2464],mean_low_water[0:1:2464]'
 
-// BKL_TKL_TND dataset for basal coastline
 const BKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/BKL_TKL_TND.nc.ascii'
-
-// MKL dataset for momentary coastline
 const MKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/MKL.nc.ascii'
-
-// MHW_MLW dataset for mean high/low water
 const MHW_MLW_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/MHW_MLW/MHW_MLW.nc.ascii'
-
-// DuneFoot dataset for dune foot
 const DF_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/DuneFoot/DF.nc.ascii'
 
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
 const AREA_CACHE_KEY = 'jarkus_area_v1'
-const RSP_CACHE_KEY = 'jarkus_rsp_v1' // NEW
-const WATER_CACHE_KEY = 'jarkus_water_v1' // NEW
+const RSP_CACHE_KEY = 'jarkus_rsp_v1'
+const WATER_CACHE_KEY = 'jarkus_water_v1'
 const TIME_DIMENSION_CACHE_KEY = 'jarkus_time_dimension_v1'
 
-// cache only if the text is smaller than this many chars (~bytes)
-const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000 // ~500 KB
+// Per-dataset time dimension lookup (DDS + 24h cache)
+const DATASET_TIME_CONFIG = {
+  transect: {
+    ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc',
+    cacheKey: TIME_DIMENSION_CACHE_KEY,
+    fallbackSize: 61,
+  },
+  bkl: {
+    ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/BKL_TKL_TND.nc',
+    cacheKey: 'jarkus_bkl_time_dimension_v1',
+    fallbackSize: 66,
+  },
+  mkl: {
+    ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/MKL.nc',
+    cacheKey: 'jarkus_mkl_time_dimension_v1',
+    fallbackSize: 61,
+  },
+  mhw: {
+    ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/MHW_MLW/MHW_MLW.nc',
+    cacheKey: 'jarkus_mhw_time_dimension_v1',
+    fallbackSize: 183,
+  },
+  df: {
+    ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/DuneFoot/DF.nc',
+    cacheKey: 'jarkus_df_time_dimension_v1',
+    fallbackSize: 183,
+  },
+}
 
-// --- Helper: tolerant number tokenizer (float, int, sci, NaN) ---
+const TIME_DIMENSION_CACHE_EXPIRATION_MS = 24 * 60 * 60 * 1000
+const MAX_LOCALSTORAGE_CACHE_SIZE = 500_000
+
 const NUM_RE = /-?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][+-]?\d+)?|NaN/gi
-
-// Pre-compile regex for better performance
 const INDEX_PATTERN = /(^|\n)\s*(?:\[\d+\]){1,4},\s*/g
 const NUM_PATTERN = /[-+]?(?:\d+\.\d+|\d+\.|\.\d+|\d+)(?:[eE][-+]?\d+)?/g
 
@@ -52,8 +63,6 @@ function stripOpendapIndices (block) {
   if (!block) {
     return ''
   }
-  // Remove leading index tags per line: e.g. "[0][0], " or "[59][0], "
-  // (^|\n) keep the break; {1,4} in case 2–3 indices appear
   return block.replace(INDEX_PATTERN, '$1')
 }
 
@@ -61,26 +70,102 @@ function tokenizeNumbers (block) {
   if (!block) {
     return []
   }
-  // Grab only numeric tokens: optional sign, decimals, and exponent part.
   const matches = block.match(NUM_PATTERN)
   if (!matches) {
     return []
   }
-  // Use pre-allocated array for better performance
-  const result = Array.from({ length: matches.length })
-  for (const [i, match] of matches.entries()) {
-    result[i] = Number(match)
-  }
-  return result
+  return matches.map(Number)
 }
 
-// NEW: Tokenizer that preserves NaN positions (maps them to null)
 function tokenizeNumbersKeepNaN (block) {
   if (!block) {
     return []
   }
   const matches = block.match(NUM_RE) || []
   return matches.map(tok => (/^nan$/i.test(tok) ? null : Number(tok)))
+}
+
+function parseTimeDimensionFromDds (ddsText) {
+  const timeDimMatch = ddsText.match(/time\s*\[time\s*=\s*(\d+)\s*\]/i)
+  if (timeDimMatch?.[1]) {
+    const size = Number.parseInt(timeDimMatch[1], 10)
+    if (size > 0) {
+      return size
+    }
+  }
+  return null
+}
+
+async function parseTimeDimensionFromAsciiError (asciiBaseUrl) {
+  const testUrl = `${asciiBaseUrl}?time[0:1:9999]`
+  const res = await fetch(testUrl, { cache: 'no-store' })
+  if (!res.ok) {
+    const errorText = await res.text()
+    const sizeMatch = errorText.match(/stop\s*>=\s*size:\s*\d+:\s*(\d+)/i)
+    if (sizeMatch?.[1]) {
+      const size = Number.parseInt(sizeMatch[1], 10)
+      if (size > 0) {
+        return size
+      }
+    }
+  }
+  return null
+}
+
+async function resolveDatasetTimeDimensionSize (config) {
+  const cached = localStorage.getItem(config.cacheKey)
+  if (cached) {
+    try {
+      const obj = JSON.parse(cached)
+      const age = Date.now() - (obj.timestamp || 0)
+      if (typeof obj.size === 'number' && obj.size > 0 && age < TIME_DIMENSION_CACHE_EXPIRATION_MS) {
+        return obj.size
+      }
+    } catch { /* ignore */ }
+  }
+
+  try {
+    const ddsUrl = `${config.ncBaseUrl}.dds`
+    const res = await fetch(ddsUrl, { cache: 'no-store' })
+    if (res.ok) {
+      const ddsText = await res.text()
+      const size = parseTimeDimensionFromDds(ddsText)
+      if (size) {
+        localStorage.setItem(config.cacheKey, JSON.stringify({ size, timestamp: Date.now() }))
+        return size
+      }
+    }
+  } catch { /* try fallback below */ }
+
+  try {
+    const size = await parseTimeDimensionFromAsciiError(`${config.ncBaseUrl}.ascii`)
+    if (size) {
+      localStorage.setItem(config.cacheKey, JSON.stringify({ size, timestamp: Date.now() }))
+      return size
+    }
+  } catch { /* use hardcoded fallback */ }
+
+  return config.fallbackSize
+}
+
+/** @type {Map<string, Promise<number>>} */
+const timeDimensionInflight = new Map()
+
+function refreshAsciiCacheInBackground (url, cacheKey) {
+  fetch(url, { cache: 'no-store' })
+    .then(res => (res.ok ? res.text() : null))
+    .then(text => {
+      if (text && text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ t: Date.now(), data: text }))
+        } catch { /* storage full */ }
+      }
+    })
+    .catch(() => {})
+}
+
+function nullifySentinel (values) {
+  return values.map(v => (v === -9999 ? null : v))
 }
 
 function toYearLabels (timeVals) {
@@ -155,9 +240,7 @@ function capturePayloadBlock (asciiRaw, varName) {
   return tail.slice(0, end)
 }
 
-// --- Helper: build chart rows in requested format ---
 function buildChartData (crossShore, times, altitude2D) {
-  // Years (string labels)
   const years = times.map(t => {
     if (t != null && Math.abs(t) >= 1500 && Math.abs(t) <= 3000) {
       return String(Math.round(t))
@@ -165,31 +248,18 @@ function buildChartData (crossShore, times, altitude2D) {
     return `t${Math.round(t ?? 0)}`
   })
 
-  // Compose rows: first row is cross_shore axis
-  const rows = []
-  rows.push(['cross_shore', ...crossShore])
-
-  // For each time slice, add a row ["YYYY", ...altRow]
-  for (const [ti, year] of years.entries()) {
-    rows.push([year, ...(altitude2D[ti] || [])])
-  }
-
   return {
     crossShore,
     years,
     altitudeByYear: altitude2D,
-    chartData: { data: rows },
   }
 }
 
-// --- Parse full ASCII payload into arrays we need ---
 function parseOpendapAscii (ascii) {
-  // Extract payload blocks by variable name (tolerant to spaces/CRLF)
   const crossBlock = capturePayloadBlock(ascii, 'cross_shore')
   const timeBlock = capturePayloadBlock(ascii, 'time')
   const altBlock = capturePayloadBlock(ascii, 'altitude')
 
-  // Clean out index tags from altitude payload before tokenizing
   const cleanAltBlock = stripOpendapIndices(altBlock)
 
   const cross = tokenizeNumbers(crossBlock)
@@ -205,7 +275,7 @@ function parseOpendapAscii (ascii) {
     )
   }
 
-  // altitude is a flat list; we reshape to [time.length][cross.length]
+  // altitude is a flat list reshaped to [time][cross_shore]
   const flatAlt = tokenizeNumbers(cleanAltBlock)
   const T = time.length
   const X = cross.length
@@ -278,7 +348,6 @@ function parseOpendapAscii (ascii) {
   return buildChartData(cross, time, altitude2D)
 }
 
-// --- helpers: parse strings list from payload (e.g., areaname) ---
 function parseQuotedStringArray (payload) {
   if (!payload) {
     return []
@@ -288,20 +357,16 @@ function parseQuotedStringArray (payload) {
   return matches.map(s => s.replace(/^"/, '').replace(/"$/, '').trim())
 }
 
-// --- Parse coastline time series data (basal and testing) ---
 function parseBasalCoastlineAscii (ascii) {
-  // Extract time, basal_coastline, and testing_coastline blocks
   const timeBlock = capturePayloadBlock(ascii, 'time')
   const basalBlock = capturePayloadBlock(ascii, 'basal_coastline')
   const testingBlock = capturePayloadBlock(ascii, 'testing_coastline')
 
-  // Clean out index tags from payloads
-  const cleanBasalBlock = stripOpendapIndices(basalBlock)
-  const cleanTestingBlock = stripOpendapIndices(testingBlock)
-
   const timeValues = tokenizeNumbers(timeBlock)
-  const basalValues = tokenizeNumbersKeepNaN(cleanBasalBlock)
-  const testingValues = cleanTestingBlock ? tokenizeNumbersKeepNaN(cleanTestingBlock) : []
+  const basalValues = tokenizeNumbersKeepNaN(stripOpendapIndices(basalBlock))
+  const testingValues = testingBlock
+    ? tokenizeNumbersKeepNaN(stripOpendapIndices(testingBlock))
+    : []
 
   if (timeValues.length === 0 || basalValues.length === 0) {
     const head = (ascii || '').slice(0, 500)
@@ -311,37 +376,19 @@ function parseBasalCoastlineAscii (ascii) {
     )
   }
 
-  // Convert time to year labels
-  const years = toYearLabels(timeValues)
-
-  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
-  const processedBasal = basalValues.map(v => (v === -9999 ? null : v))
-  const processedTesting = testingValues.length > 0
-    ? testingValues.map(v => (v === -9999 ? null : v))
-    : []
-
-  // Create data points: [year, basal_coastline_value]
-  const dataPoints = years.map((year, i) => [year, processedBasal[i]])
-
   return {
-    years,
-    basalCoastline: processedBasal,
-    testingCoastline: processedTesting,
-    dataPoints,
+    years: toYearLabels(timeValues),
+    basalCoastline: nullifySentinel(basalValues),
+    testingCoastline: testingValues.length > 0 ? nullifySentinel(testingValues) : [],
   }
 }
 
-// --- Parse momentary coastline time series data ---
 function parseMomentaryCoastlineAscii (ascii) {
-  // Extract time and momentary_coastline blocks
   const timeBlock = capturePayloadBlock(ascii, 'time')
   const momentaryBlock = capturePayloadBlock(ascii, 'momentary_coastline')
 
-  // Clean out index tags from momentary_coastline payload
-  const cleanMomentaryBlock = stripOpendapIndices(momentaryBlock)
-
   const timeValues = tokenizeNumbers(timeBlock)
-  const momentaryValues = tokenizeNumbersKeepNaN(cleanMomentaryBlock)
+  const momentaryValues = tokenizeNumbersKeepNaN(stripOpendapIndices(momentaryBlock))
 
   if (timeValues.length === 0 || momentaryValues.length === 0) {
     const head = (ascii || '').slice(0, 500)
@@ -351,32 +398,19 @@ function parseMomentaryCoastlineAscii (ascii) {
     )
   }
 
-  // Convert time to year labels
-  const years = toYearLabels(timeValues)
-
-  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
-  const processedMomentary = momentaryValues.map(v => (v === -9999 ? null : v))
-
   return {
-    years,
-    momentaryCoastline: processedMomentary,
+    momentaryCoastline: nullifySentinel(momentaryValues),
   }
 }
 
-// --- Parse mean high/low water cross time series data ---
 function parseMeanHighWaterCrossAscii (ascii) {
-  // Extract time, mean_high_water_cross, and mean_low_water_cross blocks
   const timeBlock = capturePayloadBlock(ascii, 'time')
   const mhwBlock = capturePayloadBlock(ascii, 'mean_high_water_cross')
   const mlwBlock = capturePayloadBlock(ascii, 'mean_low_water_cross')
 
-  // Clean out index tags from payloads
-  const cleanMhwBlock = stripOpendapIndices(mhwBlock)
-  const cleanMlwBlock = stripOpendapIndices(mlwBlock)
-
   const timeValues = tokenizeNumbers(timeBlock)
-  const mhwValues = tokenizeNumbersKeepNaN(cleanMhwBlock)
-  const mlwValues = cleanMlwBlock ? tokenizeNumbersKeepNaN(cleanMlwBlock) : []
+  const mhwValues = tokenizeNumbersKeepNaN(stripOpendapIndices(mhwBlock))
+  const mlwValues = mlwBlock ? tokenizeNumbersKeepNaN(stripOpendapIndices(mlwBlock)) : []
 
   if (timeValues.length === 0 || mhwValues.length === 0) {
     const head = (ascii || '').slice(0, 500)
@@ -386,33 +420,19 @@ function parseMeanHighWaterCrossAscii (ascii) {
     )
   }
 
-  // Convert time to year labels
-  const years = toYearLabels(timeValues)
-
-  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
-  const processedMhw = mhwValues.map(v => (v === -9999 ? null : v))
-  const processedMlw = mlwValues.length > 0
-    ? mlwValues.map(v => (v === -9999 ? null : v))
-    : []
-
   return {
-    years,
-    meanHighWaterCross: processedMhw,
-    meanLowWaterCross: processedMlw,
+    years: toYearLabels(timeValues),
+    meanHighWaterCross: nullifySentinel(mhwValues),
+    meanLowWaterCross: mlwValues.length > 0 ? nullifySentinel(mlwValues) : [],
   }
 }
 
-// --- Parse dune foot threeNAP cross time series data ---
 function parseDuneFootThreeNAPCrossAscii (ascii) {
-  // Extract time and dune_foot_threeNAP_cross blocks
   const timeBlock = capturePayloadBlock(ascii, 'time')
   const dfBlock = capturePayloadBlock(ascii, 'dune_foot_threeNAP_cross')
 
-  // Clean out index tags from dune_foot_threeNAP_cross payload
-  const cleanDfBlock = stripOpendapIndices(dfBlock)
-
   const timeValues = tokenizeNumbers(timeBlock)
-  const dfValues = tokenizeNumbersKeepNaN(cleanDfBlock)
+  const dfValues = tokenizeNumbersKeepNaN(stripOpendapIndices(dfBlock))
 
   if (timeValues.length === 0 || dfValues.length === 0) {
     const head = (ascii || '').slice(0, 500)
@@ -422,52 +442,38 @@ function parseDuneFootThreeNAPCrossAscii (ascii) {
     )
   }
 
-  // Convert time to year labels
-  const years = toYearLabels(timeValues)
-
-  // Handle missing values (-9999) - NaN is already converted to null by tokenizeNumbersKeepNaN
-  const processedDf = dfValues.map(v => (v === -9999 ? null : v))
-
   return {
-    years,
-    duneFootThreeNAPCross: processedDf,
+    duneFootThreeNAPCross: nullifySentinel(dfValues),
   }
 }
 
 export const useAppStore = defineStore('app', {
   state: () => ({
-    // data fetch
     loading: false,
     error: null,
-    warning: null, // non-blocking issues (e.g., cache skipped)
+    warning: null,
     rawText: '',
     fetchedAt: null,
 
-    // derived for charts
     chartReady: false,
-    chartData: null, // { data: [...] } in your requested structure
-    years: [], // e.g., ["2010","2011",...]
-    crossShore: [], // number[]
-    altitudeByYear: [], // number[][] with nulls preserved
+    years: [],
+    crossShore: [],
+    altitudeByYear: [],
 
-    // id list (transect numbers)
     loadingIds: false,
     idsError: null,
     idList: [],
     idsFetchedAt: null,
 
-    // alongshore
     loadingAlong: false,
     alongError: null,
     alongshoreList: [],
 
-    // area info
     loadingArea: false,
     areaError: null,
     areacodeList: [],
     areanameList: [],
 
-    // NEW: RSP info
     loadingRsp: false,
     rspError: null,
     rspXList: [],
@@ -475,31 +481,25 @@ export const useAppStore = defineStore('app', {
     rspLatList: [],
     rspLonList: [],
 
-    // NEW: Mean water levels
     loadingWater: false,
     waterError: null,
     meanLowWaterList: [],
     meanHighWaterList: [],
 
-    // Basal coastline time series data
     loadingBasal: false,
     basalError: null,
     basalYears: [],
     basalCoastline: [],
     testingCoastline: [],
-    basalDataPoints: [],
     basalReady: false,
     basalFetchedAt: null,
 
-    // Momentary coastline time series data
     loadingMomentary: false,
     momentaryError: null,
-    momentaryYears: [],
     momentaryCoastline: [],
     momentaryReady: false,
     momentaryFetchedAt: null,
 
-    // Mean high/low water cross time series data
     loadingMhw: false,
     mhwError: null,
     mhwYears: [],
@@ -508,20 +508,14 @@ export const useAppStore = defineStore('app', {
     mhwReady: false,
     mhwFetchedAt: null,
 
-    // Dune foot threeNAP cross time series data
     loadingDf: false,
     dfError: null,
-    dfYears: [],
     duneFootThreeNAPCross: [],
     dfReady: false,
     dfFetchedAt: null,
 
-    // Time dimension size (for dynamic URL construction)
-    timeDimensionSize: null,
-    loadingTimeDimension: false,
-    timeDimensionError: null,
+    timeDimensionSizes: {},
 
-    // fetch cancellation
     _aborter: null,
     _basalAborter: null,
     _momentaryAborter: null,
@@ -530,7 +524,6 @@ export const useAppStore = defineStore('app', {
   }),
 
   actions: {
-    // --- Transect ID list (numbers) ---
     async fetchTransectIdList () {
       if (this.idList && this.idList.length > 0) {
         return
@@ -578,7 +571,6 @@ export const useAppStore = defineStore('app', {
       return nums.map(n => Number.parseInt(String(n), 10)).filter(Number.isFinite)
     },
 
-    // --- Alongshore list (index per transect) ---
     async fetchAlongshoreList () {
       if (this.alongshoreList?.length) {
         return
@@ -619,7 +611,6 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // --- Area info (areacode + areaname) ---
     async fetchAreaInfo () {
       if (this.areacodeList?.length && this.areanameList?.length) {
         return
@@ -672,7 +663,6 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // NEW --- RSP info (rsp_x, rsp_y, rsp_lat, rsp_lon) ---
     async fetchRspInfo () {
       if (this.rspXList?.length && this.rspYList?.length && this.rspLatList?.length && this.rspLonList?.length) {
         return
@@ -730,7 +720,6 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // NEW --- Mean low/high water arrays ---
     async fetchWaterLevelsInfo () {
       if (this.meanLowWaterList?.length && this.meanHighWaterList?.length) {
         return
@@ -768,7 +757,6 @@ export const useAppStore = defineStore('app', {
           throw new Error('Water level arrays size mismatch or empty')
         }
 
-        // Normalize: keep numbers; convert NaN to null (already done by tokenizer)
         this.meanHighWaterList = high
         this.meanLowWaterList = low
 
@@ -780,120 +768,50 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // --- Fetch time dimension size for dynamic URL construction ---
-    async fetchTimeDimensionSize () {
-      // If already fetched in this session, return early
-      if (this.timeDimensionSize != null) {
-        return
+    async fetchDatasetTimeDimensionSize (datasetKey) {
+      const config = DATASET_TIME_CONFIG[datasetKey]
+      if (!config) {
+        throw new Error(`Unknown dataset key: ${datasetKey}`)
       }
 
-      // Check cache with expiration (24 hours = 86400000 ms)
-      const CACHE_EXPIRATION_MS = 24 * 60 * 60 * 1000 // 24 hours
-      const cached = localStorage.getItem(TIME_DIMENSION_CACHE_KEY)
-      if (cached) {
-        try {
-          const obj = JSON.parse(cached)
-          const now = Date.now()
-          const cachedAt = obj.timestamp || 0
-          const age = now - cachedAt
-
-          if (typeof obj.size === 'number' && obj.size > 0 && age < CACHE_EXPIRATION_MS) {
-            // Cache is still valid
-            this.timeDimensionSize = obj.size
-            return
-          }
-          // Cache expired or invalid - continue to fetch fresh data
-        } catch {
-          // Ignore cache parse errors, continue to fetch fresh data
-        }
+      const cachedSize = this.timeDimensionSizes[datasetKey]
+      if (typeof cachedSize === 'number' && cachedSize > 0) {
+        return cachedSize
       }
 
-      this.loadingTimeDimension = true
-      this.timeDimensionError = null
-
-      try {
-        // Query the DDS (Dataset Descriptor Structure) to get dimension metadata
-        // DDS contains dimension information like "time = 61;"
-        const baseUrl = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc'
-        const ddsUrl = `${baseUrl}.dds`
-
-        const res = await fetch(ddsUrl, { cache: 'no-store' })
-
-        if (!res.ok) {
-          const errorText = await res.text()
-          console.error('[fetchTimeDimensionSize] DDS Response error text:', errorText)
-          throw new Error(`Failed to fetch DDS (${res.status}): ${errorText}`)
-        }
-
-        const ddsText = await res.text()
-
-        // Parse DDS to find time dimension size
-        // Look for pattern like "Int32 time[time = 61];"
-        const timeDimMatch = ddsText.match(/time\s*\[time\s*=\s*(\d+)\s*\]/i)
-        if (timeDimMatch && timeDimMatch[1]) {
-          const size = Number.parseInt(timeDimMatch[1], 10)
-
-          if (size > 0) {
-            this.timeDimensionSize = size
-            // Cache the result with timestamp
-            localStorage.setItem(TIME_DIMENSION_CACHE_KEY, JSON.stringify({
-              size,
-              timestamp: Date.now(),
-            }))
-            return
-          }
-        }
-
-        // Fallback: try to extract from error message if DDS parsing fails
-        // Error messages sometimes contain "stop >= size: requested:actual"
-        throw new Error('Could not parse time dimension size from DDS')
-      } catch (error) {
-        // Try alternative: query with a reasonable range and parse error message
-        // The error message contains the actual size: "stop >= size: 9999:61"
-        try {
-          const baseUrl = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii'
-          const testUrl = `${baseUrl}?time[0:1:9999]`
-
-          const res = await fetch(testUrl, { cache: 'no-store' })
-          if (!res.ok) {
-            const errorText = await res.text()
-
-            // Parse error message: "stop >= size: 9999:61"
-            const sizeMatch = errorText.match(/stop\s*>=\s*size:\s*\d+:\s*(\d+)/i)
-            if (sizeMatch && sizeMatch[1]) {
-              const size = Number.parseInt(sizeMatch[1], 10)
-
-              if (size > 0) {
-                this.timeDimensionSize = size
-                localStorage.setItem(TIME_DIMENSION_CACHE_KEY, JSON.stringify({
-                  size,
-                  timestamp: Date.now(),
-                }))
-                return
-              }
-            }
-          }
-        } catch {
-          // Alternative method failed, will use fallback
-        }
-
-        this.timeDimensionError = error?.message || String(error)
-        // Fallback to default value if all methods fail
-        this.timeDimensionSize = 61
-      } finally {
-        this.loadingTimeDimension = false
+      let inflight = timeDimensionInflight.get(datasetKey)
+      if (!inflight) {
+        inflight = resolveDatasetTimeDimensionSize(config)
+        timeDimensionInflight.set(datasetKey, inflight)
+        inflight.finally(() => {
+          timeDimensionInflight.delete(datasetKey)
+        })
       }
+
+      const size = await inflight
+      this.timeDimensionSizes[datasetKey] = size
+      return size
     },
 
-    // --- Basal coastline time series fetch ---
+    async fetchAllDatasetTimeDimensions () {
+      await Promise.all(
+        Object.keys(DATASET_TIME_CONFIG).map(key => this.fetchDatasetTimeDimensionSize(key)),
+      )
+    },
+
+    async _timeMaxIndex (datasetKey) {
+      const size = await this.fetchDatasetTimeDimensionSize(datasetKey)
+      return size > 0 ? size - 1 : 0
+    },
+
     async fetchBasalCoastline (transectIndex) {
       if (transectIndex < 0 || transectIndex >= 2465) {
         this.basalError = 'Invalid transect index'
         return
       }
 
-      // Build URL: time[0:1:63], basal_coastline[0:1:63][transectIndex], testing_coastline[0:1:63][transectIndex]
-      const url = `${BKL_BASE_URL}?time[0:1:63],basal_coastline[0:1:63][${transectIndex}],testing_coastline[0:1:63][${transectIndex}]`
+      const timeMax = await this._timeMaxIndex('bkl')
+      const url = `${BKL_BASE_URL}?time[0:1:${timeMax}],basal_coastline[0:1:${timeMax}][${transectIndex}],testing_coastline[0:1:${timeMax}][${transectIndex}]`
 
       // Check cache first
       const cacheKey = `bkl_cache::${url}`
@@ -907,14 +825,12 @@ export const useAppStore = defineStore('app', {
             this.basalYears = parsed.years
             this.basalCoastline = parsed.basalCoastline
             this.testingCoastline = parsed.testingCoastline
-            this.basalDataPoints = parsed.dataPoints
             this.basalReady = true
             this.basalFetchedAt = obj.t || null
             this.basalError = null
             this.loadingBasal = false
 
-            // Refresh cache in background
-            this._refreshBasalCacheInBackground(url, cacheKey)
+            refreshAsciiCacheInBackground(url, cacheKey)
             return
           }
         } catch (error) {
@@ -938,7 +854,6 @@ export const useAppStore = defineStore('app', {
       this.basalYears = []
       this.basalCoastline = []
       this.testingCoastline = []
-      this.basalDataPoints = []
 
       try {
         const res = await fetch(url, { cache: 'no-store', signal: this._basalAborter.signal })
@@ -953,7 +868,6 @@ export const useAppStore = defineStore('app', {
         this.basalYears = parsed.years
         this.basalCoastline = parsed.basalCoastline
         this.testingCoastline = parsed.testingCoastline
-        this.basalDataPoints = parsed.dataPoints
         this.basalReady = true
 
         // Cache if reasonably small
@@ -978,38 +892,14 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // Background cache refresh for basal coastline
-    async _refreshBasalCacheInBackground (url, cacheKey) {
-      try {
-        const res = await fetch(url, { cache: 'no-store' })
-        if (res.ok) {
-          const text = await res.text()
-          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
-            try {
-              localStorage.setItem(cacheKey, JSON.stringify({
-                t: Date.now(),
-                data: text,
-              }))
-            } catch {
-              // Silent fail
-            }
-          }
-        }
-      } catch {
-        // Silent fail for background refresh
-      }
-    },
-
-    // --- Momentary coastline time series fetch ---
     async fetchMomentaryCoastline (transectIndex) {
       if (transectIndex < 0 || transectIndex >= 2465) {
         this.momentaryError = 'Invalid transect index'
         return
       }
 
-      // Build URL: time[0:1:59], momentary_coastline[0:1:59][transectIndex]
-      // Note: MKL dataset has time[time = 60], so range is [0:1:59]
-      const url = `${MKL_BASE_URL}?time[0:1:59],momentary_coastline[0:1:59][${transectIndex}]`
+      const timeMax = await this._timeMaxIndex('mkl')
+      const url = `${MKL_BASE_URL}?time[0:1:${timeMax}],momentary_coastline[0:1:${timeMax}][${transectIndex}]`
 
       // Check cache first
       const cacheKey = `mkl_cache::${url}`
@@ -1020,15 +910,13 @@ export const useAppStore = defineStore('app', {
           const text = obj.data || ''
           if (text) {
             const parsed = parseMomentaryCoastlineAscii(text)
-            this.momentaryYears = parsed.years
             this.momentaryCoastline = parsed.momentaryCoastline
             this.momentaryReady = true
             this.momentaryFetchedAt = obj.t || null
             this.momentaryError = null
             this.loadingMomentary = false
 
-            // Refresh cache in background
-            this._refreshMomentaryCacheInBackground(url, cacheKey)
+            refreshAsciiCacheInBackground(url, cacheKey)
             return
           }
         } catch (error) {
@@ -1049,7 +937,6 @@ export const useAppStore = defineStore('app', {
       this.loadingMomentary = true
       this.momentaryError = null
       this.momentaryReady = false
-      this.momentaryYears = []
       this.momentaryCoastline = []
 
       try {
@@ -1062,7 +949,6 @@ export const useAppStore = defineStore('app', {
 
         // Parse the data
         const parsed = parseMomentaryCoastlineAscii(text)
-        this.momentaryYears = parsed.years
         this.momentaryCoastline = parsed.momentaryCoastline
         this.momentaryReady = true
 
@@ -1088,38 +974,14 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // Background cache refresh for momentary coastline
-    async _refreshMomentaryCacheInBackground (url, cacheKey) {
-      try {
-        const res = await fetch(url, { cache: 'no-store' })
-        if (res.ok) {
-          const text = await res.text()
-          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
-            try {
-              localStorage.setItem(cacheKey, JSON.stringify({
-                t: Date.now(),
-                data: text,
-              }))
-            } catch {
-              // Silent fail
-            }
-          }
-        }
-      } catch {
-        // Silent fail for background refresh
-      }
-    },
-
-    // --- Mean high water cross time series fetch ---
     async fetchMeanHighWaterCross (transectIndex) {
       if (transectIndex < 0 || transectIndex >= 2465) {
         this.mhwError = 'Invalid transect index'
         return
       }
 
-      // Build URL: time[0:1:182], mean_high_water_cross[0:1:182][transectIndex], mean_low_water_cross[0:1:182][transectIndex]
-      // Note: MHW_MLW dataset has time[time = 183], so range is [0:1:182]
-      const url = `${MHW_MLW_BASE_URL}?time[0:1:182],mean_high_water_cross[0:1:182][${transectIndex}],mean_low_water_cross[0:1:182][${transectIndex}]`
+      const timeMax = await this._timeMaxIndex('mhw')
+      const url = `${MHW_MLW_BASE_URL}?time[0:1:${timeMax}],mean_high_water_cross[0:1:${timeMax}][${transectIndex}],mean_low_water_cross[0:1:${timeMax}][${transectIndex}]`
 
       // Check cache first
       const cacheKey = `mhw_cache::${url}`
@@ -1139,7 +1001,7 @@ export const useAppStore = defineStore('app', {
             this.loadingMhw = false
 
             // Refresh cache in background
-            this._refreshMhwCacheInBackground(url, cacheKey)
+            refreshAsciiCacheInBackground(url, cacheKey)
             return
           }
         } catch (error) {
@@ -1201,38 +1063,14 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // Background cache refresh for mean high water cross
-    async _refreshMhwCacheInBackground (url, cacheKey) {
-      try {
-        const res = await fetch(url, { cache: 'no-store' })
-        if (res.ok) {
-          const text = await res.text()
-          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
-            try {
-              localStorage.setItem(cacheKey, JSON.stringify({
-                t: Date.now(),
-                data: text,
-              }))
-            } catch {
-              // Silent fail
-            }
-          }
-        }
-      } catch {
-        // Silent fail for background refresh
-      }
-    },
-
-    // --- Dune foot threeNAP cross time series fetch ---
     async fetchDuneFootThreeNAPCross (transectIndex) {
       if (transectIndex < 0 || transectIndex >= 2465) {
         this.dfError = 'Invalid transect index'
         return
       }
 
-      // Build URL: time[0:1:181], dune_foot_threeNAP_cross[0:1:181][transectIndex]
-      // Note: DF dataset has time[time = 182], so range is [0:1:181]
-      const url = `${DF_BASE_URL}?time[0:1:181],dune_foot_threeNAP_cross[0:1:181][${transectIndex}]`
+      const timeMax = await this._timeMaxIndex('df')
+      const url = `${DF_BASE_URL}?time[0:1:${timeMax}],dune_foot_threeNAP_cross[0:1:${timeMax}][${transectIndex}]`
 
       // Check cache first
       const cacheKey = `df_cache::${url}`
@@ -1243,15 +1081,13 @@ export const useAppStore = defineStore('app', {
           const text = obj.data || ''
           if (text) {
             const parsed = parseDuneFootThreeNAPCrossAscii(text)
-            this.dfYears = parsed.years
             this.duneFootThreeNAPCross = parsed.duneFootThreeNAPCross
             this.dfReady = true
             this.dfFetchedAt = obj.t || null
             this.dfError = null
             this.loadingDf = false
 
-            // Refresh cache in background
-            this._refreshDfCacheInBackground(url, cacheKey)
+            refreshAsciiCacheInBackground(url, cacheKey)
             return
           }
         } catch (error) {
@@ -1272,7 +1108,6 @@ export const useAppStore = defineStore('app', {
       this.loadingDf = true
       this.dfError = null
       this.dfReady = false
-      this.dfYears = []
       this.duneFootThreeNAPCross = []
 
       try {
@@ -1285,7 +1120,6 @@ export const useAppStore = defineStore('app', {
 
         // Parse the data
         const parsed = parseDuneFootThreeNAPCrossAscii(text)
-        this.dfYears = parsed.years
         this.duneFootThreeNAPCross = parsed.duneFootThreeNAPCross
         this.dfReady = true
 
@@ -1311,29 +1145,13 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // Background cache refresh for dune foot threeNAP cross
-    async _refreshDfCacheInBackground (url, cacheKey) {
-      try {
-        const res = await fetch(url, { cache: 'no-store' })
-        if (res.ok) {
-          const text = await res.text()
-          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
-            try {
-              localStorage.setItem(cacheKey, JSON.stringify({
-                t: Date.now(),
-                data: text,
-              }))
-            } catch {
-              // Silent fail
-            }
-          }
-        }
-      } catch {
-        // Silent fail for background refresh
-      }
+    _applyAltitudeChart (parsed) {
+      this.years = parsed.years
+      this.crossShore = parsed.crossShore
+      this.altitudeByYear = parsed.altitudeByYear
+      this.chartReady = true
     },
 
-    // --- OpenDAP data fetch & cautious cache + parsing to chart format ---
     async fetchOpendapAscii (url) {
       if (!url) {
         return
@@ -1347,21 +1165,15 @@ export const useAppStore = defineStore('app', {
           const obj = JSON.parse(cached)
           const text = obj.data || ''
           if (text) {
-            // Parse cached data immediately (synchronous, fast)
             const parsed = parseOpendapAscii(text)
-            this.chartData = parsed.chartData
-            this.years = parsed.years
-            this.crossShore = parsed.crossShore
-            this.altitudeByYear = parsed.altitudeByYear
-            this.chartReady = true
+            this._applyAltitudeChart(parsed)
             this.rawText = text
             this.fetchedAt = obj.t || null
             this.error = null
             this.warning = null
             this.loading = false
 
-            // Still fetch in background to refresh cache (non-blocking)
-            this._refreshCacheInBackground(url)
+            refreshAsciiCacheInBackground(url, cacheKey)
             return
           }
         } catch (error) {
@@ -1384,7 +1196,6 @@ export const useAppStore = defineStore('app', {
       this.error = null
       this.warning = null
       this.chartReady = false
-      this.chartData = null
       this.years = []
       this.crossShore = []
       this.altitudeByYear = []
@@ -1397,13 +1208,7 @@ export const useAppStore = defineStore('app', {
         this.rawText = text
         this.fetchedAt = Date.now()
 
-        // Parse immediately to target format
-        const parsed = parseOpendapAscii(text)
-        this.chartData = parsed.chartData
-        this.years = parsed.years
-        this.crossShore = parsed.crossShore
-        this.altitudeByYear = parsed.altitudeByYear
-        this.chartReady = true
+        this._applyAltitudeChart(parseOpendapAscii(text))
 
         // Try to cache only if reasonably small
         if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
@@ -1426,29 +1231,6 @@ export const useAppStore = defineStore('app', {
       }
     },
 
-    // Background cache refresh (non-blocking)
-    async _refreshCacheInBackground (url) {
-      // Silently refresh cache in background without blocking UI
-      try {
-        const res = await fetch(url, { cache: 'no-store' })
-        if (res.ok) {
-          const text = await res.text()
-          if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
-            try {
-              localStorage.setItem(this._cacheKey(url), JSON.stringify({
-                t: Date.now(),
-                data: text,
-              }))
-            } catch {
-              // Silent fail for background refresh
-            }
-          }
-        }
-      } catch {
-        // Silent fail for background refresh
-      }
-    },
-
     async loadFromCache (url) {
       if (!url) {
         return
@@ -1466,13 +1248,7 @@ export const useAppStore = defineStore('app', {
         this.error = null
         this.warning = null
 
-        // also parse cached text to chartData
-        const parsed = parseOpendapAscii(text)
-        this.chartData = parsed.chartData
-        this.years = parsed.years
-        this.crossShore = parsed.crossShore
-        this.altitudeByYear = parsed.altitudeByYear
-        this.chartReady = true
+        this._applyAltitudeChart(parseOpendapAscii(text))
       } catch (error) {
         this.error = error?.message || 'Failed to load/parse cache.'
       }
