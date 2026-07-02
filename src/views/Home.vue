@@ -3,801 +3,783 @@
   <div class="layout">
     <SidePanel :transect-num="currentTransectNum" />
     <div class="chart-wrap">
-      <div ref="chartRef" class="chart"></div>
-      <div ref="basalChartRef" class="chart"></div>
-      <div ref="mhwChartRef" class="chart"></div>
+      <div ref="chartRef" class="chart" />
+      <div ref="basalChartRef" class="chart" />
+      <div ref="mhwChartRef" class="chart" />
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
-import { useAppStore } from '@/stores/app'
-import * as echarts from 'echarts'
-import SidePanel from '@/components/SidePanel.vue'
+  import * as echarts from 'echarts'
+  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+  import { useRoute } from 'vue-router'
+  import SidePanel from '@/components/SidePanel.vue'
+  import { useAppStore } from '@/stores/app'
 
-const DEFAULT_TRANSECT_NUMBER = 1000475
+  const DEFAULT_TRANSECT_NUMBER = 1_000_475
 
-const route = useRoute()
-const store = useAppStore()
+  const route = useRoute()
+  const store = useAppStore()
 
-// Debounce utility for performance optimization
-function debounce (func, wait) {
-  let timeout
-  return function executedFunction (...args) {
-    const later = () => {
+  // Debounce utility for performance optimization
+  function debounce (func, wait) {
+    let timeout
+    return function executedFunction (...args) {
+      const later = () => {
+        clearTimeout(timeout)
+        func(...args)
+      }
       clearTimeout(timeout)
-      func(...args)
-    }
-    clearTimeout(timeout)
-    timeout = setTimeout(later, wait)
-  }
-}
-
-// Store-derived data for charting
-const chartReady     = computed(() => store.chartReady)
-const years          = computed(() => store.years)
-const crossShore     = computed(() => store.crossShore)
-const altitudeByYear = computed(() => store.altitudeByYear)
-
-// Basal coastline data
-const basalReady = computed(() => store.basalReady)
-const basalYears = computed(() => store.basalYears)
-const basalCoastline = computed(() => store.basalCoastline)
-const testingCoastline = computed(() => store.testingCoastline)
-const basalDataPoints = computed(() => store.basalDataPoints)
-
-// Momentary coastline data
-const momentaryReady = computed(() => store.momentaryReady)
-const momentaryYears = computed(() => store.momentaryYears)
-const momentaryCoastline = computed(() => store.momentaryCoastline)
-
-// Mean high/low water cross data
-const mhwReady = computed(() => store.mhwReady)
-const mhwYears = computed(() => store.mhwYears)
-const meanHighWaterCross = computed(() => store.meanHighWaterCross)
-const meanLowWaterCross = computed(() => store.meanLowWaterCross)
-
-// Dune foot threeNAP cross data
-const dfReady = computed(() => store.dfReady)
-const dfYears = computed(() => store.dfYears)
-const duneFootThreeNAPCross = computed(() => store.duneFootThreeNAPCross)
-
-// Current transect number from route (fallback to default)
-const currentTransectNum = computed(() => {
-  const raw = route.params.transectNum
-  const n = Number(raw)
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_TRANSECT_NUMBER
-})
-
-// Catalog and index lookup
-const idList = computed(() => store.idList)
-const wantedIndex = computed(() => {
-  if (!idList.value || idList.value.length === 0) return -1
-  return idList.value.indexOf(currentTransectNum.value)
-})
-const indexNotFound = computed(() => wantedIndex.value < 0)
-
-// Get time dimension size from store
-const timeDimensionSize = computed(() => store.timeDimensionSize || 61) // Fallback to 61 if not yet loaded
-
-const url = computed(() => {
-  if (indexNotFound.value) return ''
-  const idx = wantedIndex.value
-  const timeSize = timeDimensionSize.value
-  const timeMax = timeSize > 0 ? timeSize - 1 : 60 // Convert size to max index
-  return `https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?cross_shore[0:1:2462],time[0:1:${timeMax}],altitude[0:1:${timeMax}][${idx}][0:1:2462]`
-})
-
-async function fetchNow () {
-  if (indexNotFound.value) return
-  await store.fetchOpendapAscii(url.value)
-}
-
-/* -------------------- Jet colormap utility -------------------- */
-function createJetColormap (n) {
-  if (!Number.isFinite(n) || n <= 0) return []
-  if (n === 1) return ['rgb(0,0,131)'] // arbitrary single color
-
-  function jetRGB (t) {
-    t = Math.max(0, Math.min(1, t))
-    const r = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 3)))
-    const g = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 2)))
-    const b = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 1)))
-    const gamma = 0.9
-    const to255 = (x) => Math.round(255 * Math.pow(x, gamma))
-    return `rgb(${to255(r)},${to255(g)},${to255(b)})`
-  }
-
-  const colors = []
-  for (let i = 0; i < n; i++) {
-    const t = n === 1 ? 0.5 : 1 - i / (n - 1) // reversed: red → blue
-    colors.push(jetRGB(t))
-  }
-  return colors
-}
-
-/* -------------------- ECharts setup -------------------- */
-const chartRef = ref(null)
-let chart = null
-
-const basalChartRef = ref(null)
-let basalChart = null
-
-const mhwChartRef = ref(null)
-let mhwChart = null
-
-function disposeChart () {
-  if (chart) {
-    chart.dispose()
-    chart = null
-  }
-}
-
-function disposeBasalChart () {
-  if (basalChart) {
-    basalChart.dispose()
-    basalChart = null
-  }
-}
-
-function disposeMhwChart () {
-  if (mhwChart) {
-    mhwChart.dispose()
-    mhwChart = null
-  }
-}
-
-// Memoize expensive computations using computed properties
-const xAxisBounds = computed(() => {
-  const xs = crossShore.value || []
-  const byYear = altitudeByYear.value || []
-  if (!xs.length || !byYear.length) {
-    return { min: null, max: null }
-  }
-
-  // Optimize: use Set for faster lookup, single pass
-  const used = new Set()
-  for (let t = 0; t < byYear.length; t++) {
-    const row = byYear[t]
-    if (!row) continue
-    for (let i = 0; i < Math.min(row.length, xs.length); i++) {
-      const v = row[i]
-      if (v != null && Number.isFinite(v)) {
-        used.add(i)
-      }
+      timeout = setTimeout(later, wait)
     }
   }
 
-  if (used.size === 0) {
-    return { min: Math.min(...xs), max: Math.max(...xs) }
-  }
+  // Store-derived data for charting
+  const chartReady = computed(() => store.chartReady)
+  const years = computed(() => store.years)
+  const crossShore = computed(() => store.crossShore)
+  const altitudeByYear = computed(() => store.altitudeByYear)
 
-  const usedXs = Array.from(used).map(i => xs[i])
-  return { min: Math.min(...usedXs), max: Math.max(...usedXs) }
-})
+  // Basal coastline data
+  const basalReady = computed(() => store.basalReady)
+  const basalYears = computed(() => store.basalYears)
+  const basalCoastline = computed(() => store.basalCoastline)
+  const testingCoastline = computed(() => store.testingCoastline)
 
-// Find the cross_shore position to mark (closest to 0) - memoized
-const rspX = computed(() => {
-  const xs = crossShore.value || []
-  if (!xs.length) return null
-  let closest = xs[0]
-  let best = Math.abs(xs[0])
-  for (let i = 1; i < xs.length; i++) {
-    const d = Math.abs(xs[i])
-    if (d < best) { best = d; closest = xs[i] }
-  }
-  return closest
-})
+  // Momentary coastline data
+  const momentaryReady = computed(() => store.momentaryReady)
+  const momentaryCoastline = computed(() => store.momentaryCoastline)
 
-// Memoize series data
-const seriesData = computed(() => {
-  const ys = years.value || []
-  const xs = crossShore.value || []
-  const byYear = altitudeByYear.value || []
-  if (!ys.length || !xs.length || !byYear.length) return []
+  // Mean high/low water cross data
+  const mhwReady = computed(() => store.mhwReady)
+  const mhwYears = computed(() => store.mhwYears)
+  const meanHighWaterCross = computed(() => store.meanHighWaterCross)
+  const meanLowWaterCross = computed(() => store.meanLowWaterCross)
 
-  const rspXVal = rspX.value
+  // Dune foot threeNAP cross data
+  const dfReady = computed(() => store.dfReady)
+  const duneFootThreeNAPCross = computed(() => store.duneFootThreeNAPCross)
 
-  return ys.map((label, tIndex) => {
-    const row = byYear[tIndex] || []
-    // Pre-allocate array for better performance
-    const points = new Array(xs.length)
-    for (let i = 0; i < xs.length; i++) {
-      points[i] = row[i] == null ? [xs[i], null] : [xs[i], row[i]]
-    }
-
-    // Attach the vertical markLine to the first series so it spans the chart
-    const seriesObj = {
-      name: label,
-      type: 'line',
-      showSymbol: false,
-      connectNulls: true,
-      data: points,
-    }
-
-    if (tIndex === 0 && rspXVal != null && Number.isFinite(rspXVal)) {
-      seriesObj.markLine = {
-        symbol: 'none',
-        lineStyle: { color: '#000', width: 1.5, type: 'dashed' },
-        label: {
-          formatter: '{b}',
-          position: 'insideEndTop'
-        },
-        data: [{
-          name: 'RSP Lijn',
-          xAxis: rspXVal,
-          itemStyle: { color: '#000' }
-        }]
-      }
-    }
-    return seriesObj
+  // Current transect number from route (fallback to default)
+  const currentTransectNum = computed(() => {
+    const raw = route.params.transectNum
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_TRANSECT_NUMBER
   })
-})
 
-// Memoize color palette
-const colorPalette = computed(() => {
-  return createJetColormap(seriesData.value.length)
-})
+  // Catalog and index lookup
+  const idList = computed(() => store.idList)
+  const wantedIndex = computed(() => {
+    if (!idList.value || idList.value.length === 0) return -1
+    return idList.value.indexOf(currentTransectNum.value)
+  })
+  const indexNotFound = computed(() => wantedIndex.value < 0)
 
-// Helper to extract x/y robustly from tooltip param
-function getXY (p) {
-  if (Array.isArray(p?.value)) return { x: p.value[0], y: p.value[1] }
-  if (Array.isArray(p?.data))  return { x: p.data[0],  y: p.data[1]  }
-  return { x: p?.axisValue, y: p?.value }
-}
+  // Get time dimension size from store
+  const timeDimensionSize = computed(() => store.timeDimensionSizes.transect ?? 61)
 
-function renderChart () {
-  try {
-    if (!chartRef.value) return
-    if (!chart) {
-      chart = echarts.init(chartRef.value, undefined, { renderer: 'canvas' })
-      window.addEventListener('resize', handleResize)
-    }
+  const url = computed(() => {
+    if (indexNotFound.value) return ''
+    const idx = wantedIndex.value
+    const timeMax = timeDimensionSize.value - 1
+    return `https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii?cross_shore[0:1:2462],time[0:1:${timeMax}],altitude[0:1:${timeMax}][${idx}][0:1:2462]`
+  })
 
-    // Use memoized values for better performance
-    const { min: xMin, max: xMax } = xAxisBounds.value
-    const series = seriesData.value
-    const palette = colorPalette.value
-
-    const option = {
-      animation: true,
-      color: palette,
-      title: {
-        text: `Transect ${currentTransectNum.value}`,
-        left: 'center',
-        top: 8,
-        textStyle: {
-          fontSize: 24,
-          fontWeight: '600',
-        },
-      },
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'line' },
-        formatter: (params) => {
-          const arr = Array.isArray(params) ? params : [params]
-          const valid = arr.filter(p => {
-            const { y } = getXY(p)
-            return y != null && Number.isFinite(Number(y))
-          })
-          if (valid.length === 0) return ''
-          const { x } = getXY(valid[0])
-          const header = `<b>Cross-shore: ${x} m</b>`
-          
-          // Split into columns of 25 items each
-          const itemsPerColumn = 25
-          const columns = []
-          for (let i = 0; i < valid.length; i += itemsPerColumn) {
-            const column = valid.slice(i, i + itemsPerColumn)
-            const columnLines = column.map(p => {
-              const { y } = getXY(p)
-              const marker = p.marker || ''
-              return `<b>${marker}${p.seriesName}</b>: ${y} m`
-            })
-            columns.push(columnLines)
-          }
-          
-          // Format as columns using table
-          if (columns.length === 1) {
-            // Single column: simple format
-            return [header, ...columns[0]].join('<br/>')
-          } else {
-            // Multiple columns: use table layout
-            const maxRows = Math.max(...columns.map(col => col.length))
-            let tableRows = `<tr><td colspan="${columns.length}" style="padding-bottom: 8px; border-bottom: 1px solid #ddd;"><b>Cross-shore: ${x} m</b></td></tr>`
-            
-            for (let row = 0; row < maxRows; row++) {
-              tableRows += '<tr>'
-              for (let col = 0; col < columns.length; col++) {
-                const cell = columns[col][row] || ''
-                tableRows += `<td style="padding: 2px 12px; vertical-align: top;">${cell}</td>`
-              }
-              tableRows += '</tr>'
-            }
-            
-            return `<table style="border-collapse: collapse;">${tableRows}</table>`
-          }
-        },
-        showDelay: 0,
-        hideDelay: 50,
-        confine: true,
-      },
-      legend: {
-        top: 56,
-        selector: [{ title: 'All' }],
-        selectorPosition: 'start',
-      },
-      grid: {
-        top: 172,
-        right: 72,
-        bottom: 96,
-        left: 72,
-        containLabel: true,
-      },
-      xAxis: {
-        type: 'value',
-        name: 'Cross-shore (m)',
-        nameLocation: 'middle',
-        nameGap: 32,
-        min: xMin,
-        max: xMax,
-        axisLine: { onZero: false },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Elevation (m)',
-        nameLocation: 'middle',
-        nameGap: 42,
-      },
-      dataZoom: [
-        { type: 'inside', xAxisIndex: 0 },
-        { type: 'slider', xAxisIndex: 0, height: 18, bottom: 24 }
-      ],
-      series,
-      progressive: 2000,
-      progressiveThreshold: 10000,
-    }
-
-    chart.setOption(option, true)
-  } catch (e) {
-    console.error('ECharts render error:', e)
+  async function fetchNow () {
+    if (indexNotFound.value) return
+    await store.fetchOpendapAscii(url.value)
   }
-}
 
-// Helper function to find first valid (non-null, non-NaN) index across multiple series
-function findFirstValidIndex (...seriesArrays) {
-  const maxLength = Math.max(...seriesArrays.map(arr => arr?.length || 0))
-  for (let i = 0; i < maxLength; i++) {
-    for (const series of seriesArrays) {
-      if (series && series[i] != null && Number.isFinite(series[i])) {
-        return i
+  /* -------------------- Jet colormap utility -------------------- */
+  function createJetColormap (n) {
+    if (!Number.isFinite(n) || n <= 0) return []
+    if (n === 1) return ['rgb(0,0,131)'] // arbitrary single color
+
+    function jetRGB (t) {
+      t = Math.max(0, Math.min(1, t))
+      const r = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 3)))
+      const g = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 2)))
+      const b = Math.min(1, Math.max(0, 1.5 - Math.abs(4 * t - 1)))
+      const gamma = 0.9
+      const to255 = x => Math.round(255 * Math.pow(x, gamma))
+      return `rgb(${to255(r)},${to255(g)},${to255(b)})`
+    }
+
+    const colors = []
+    for (let i = 0; i < n; i++) {
+      const t = n === 1 ? 0.5 : 1 - i / (n - 1) // reversed: red → blue
+      colors.push(jetRGB(t))
+    }
+    return colors
+  }
+
+  /* -------------------- ECharts setup -------------------- */
+  const chartRef = ref(null)
+  let chart = null
+
+  const basalChartRef = ref(null)
+  let basalChart = null
+
+  const mhwChartRef = ref(null)
+  let mhwChart = null
+
+  function disposeChart () {
+    if (chart) {
+      chart.dispose()
+      chart = null
+    }
+  }
+
+  function disposeBasalChart () {
+    if (basalChart) {
+      basalChart.dispose()
+      basalChart = null
+    }
+  }
+
+  function disposeMhwChart () {
+    if (mhwChart) {
+      mhwChart.dispose()
+      mhwChart = null
+    }
+  }
+
+  // Memoize expensive computations using computed properties
+  const xAxisBounds = computed(() => {
+    const xs = crossShore.value || []
+    const byYear = altitudeByYear.value || []
+    if (xs.length === 0 || byYear.length === 0) {
+      return { min: null, max: null }
+    }
+
+    // Optimize: use Set for faster lookup, single pass
+    const used = new Set()
+    for (const row of byYear) {
+      if (!row) continue
+      for (let i = 0; i < Math.min(row.length, xs.length); i++) {
+        const v = row[i]
+        if (v != null && Number.isFinite(v)) {
+          used.add(i)
+        }
       }
     }
+
+    if (used.size === 0) {
+      return { min: Math.min(...xs), max: Math.max(...xs) }
+    }
+
+    const usedXs = Array.from(used).map(i => xs[i])
+    return { min: Math.min(...usedXs), max: Math.max(...usedXs) }
+  })
+
+  // Find the cross_shore position to mark (closest to 0) - memoized
+  const rspX = computed(() => {
+    const xs = crossShore.value || []
+    if (xs.length === 0) return null
+    let closest = xs[0]
+    let best = Math.abs(xs[0])
+    for (let i = 1; i < xs.length; i++) {
+      const d = Math.abs(xs[i])
+      if (d < best) {
+        best = d; closest = xs[i]
+      }
+    }
+    return closest
+  })
+
+  // Memoize series data
+  const seriesData = computed(() => {
+    const ys = years.value || []
+    const xs = crossShore.value || []
+    const byYear = altitudeByYear.value || []
+    if (ys.length === 0 || xs.length === 0 || byYear.length === 0) return []
+
+    const rspXVal = rspX.value
+
+    return ys.map((label, tIndex) => {
+      const row = byYear[tIndex] || []
+      // Pre-allocate array for better performance
+      const points = Array.from({ length: xs.length })
+      for (const [i, x] of xs.entries()) {
+        points[i] = row[i] == null ? [x, null] : [x, row[i]]
+      }
+
+      // Attach the vertical markLine to the first series so it spans the chart
+      const seriesObj = {
+        name: label,
+        type: 'line',
+        showSymbol: false,
+        connectNulls: true,
+        data: points,
+      }
+
+      if (tIndex === 0 && rspXVal != null && Number.isFinite(rspXVal)) {
+        seriesObj.markLine = {
+          symbol: 'none',
+          lineStyle: { color: '#000', width: 1.5, type: 'dashed' },
+          label: {
+            formatter: '{b}',
+            position: 'insideEndTop',
+          },
+          data: [{
+            name: 'RSP Lijn',
+            xAxis: rspXVal,
+            itemStyle: { color: '#000' },
+          }],
+        }
+      }
+      return seriesObj
+    })
+  })
+
+  // Memoize color palette
+  const colorPalette = computed(() => {
+    return createJetColormap(seriesData.value.length)
+  })
+
+  // Helper to extract x/y robustly from tooltip param
+  function getXY (p) {
+    if (Array.isArray(p?.value)) return { x: p.value[0], y: p.value[1] }
+    if (Array.isArray(p?.data)) return { x: p.data[0], y: p.data[1] }
+    return { x: p?.axisValue, y: p?.value }
   }
-  return 0 // Default to start if no valid values found
-}
 
-function renderBasalChart () {
-  try {
-    if (!basalChartRef.value) return
-    if (!basalChart) {
-      basalChart = echarts.init(basalChartRef.value, undefined, { renderer: 'canvas' })
-      window.addEventListener('resize', handleBasalResize)
+  function renderChart () {
+    try {
+      if (!chartRef.value) return
+      if (!chart) {
+        chart = echarts.init(chartRef.value, undefined, { renderer: 'canvas' })
+      }
+
+      // Use memoized values for better performance
+      const { min: xMin, max: xMax } = xAxisBounds.value
+      const series = seriesData.value
+      const palette = colorPalette.value
+
+      const option = {
+        animation: true,
+        color: palette,
+        title: {
+          text: `Transect ${currentTransectNum.value}`,
+          left: 'center',
+          top: 8,
+          textStyle: {
+            fontSize: 24,
+            fontWeight: '600',
+          },
+        },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'line' },
+          formatter: params => {
+            const arr = Array.isArray(params) ? params : [params]
+            const valid = arr.filter(p => {
+              const { y } = getXY(p)
+              return y != null && Number.isFinite(Number(y))
+            })
+            if (valid.length === 0) return ''
+            const { x } = getXY(valid[0])
+            const header = `<b>Cross-shore: ${x} m</b>`
+
+            // Split into columns of 25 items each
+            const itemsPerColumn = 25
+            const columns = []
+            for (let i = 0; i < valid.length; i += itemsPerColumn) {
+              const column = valid.slice(i, i + itemsPerColumn)
+              const columnLines = column.map(p => {
+                const { y } = getXY(p)
+                const marker = p.marker || ''
+                return `<b>${marker}${p.seriesName}</b>: ${y} m`
+              })
+              columns.push(columnLines)
+            }
+
+            // Format as columns using table
+            if (columns.length === 1) {
+              // Single column: simple format
+              return [header, ...columns[0]].join('<br/>')
+            } else {
+              // Multiple columns: use table layout
+              const maxRows = Math.max(...columns.map(col => col.length))
+              let tableRows = `<tr><td colspan="${columns.length}" style="padding-bottom: 8px; border-bottom: 1px solid #ddd;"><b>Cross-shore: ${x} m</b></td></tr>`
+
+              for (let row = 0; row < maxRows; row++) {
+                tableRows += '<tr>'
+                for (const column of columns) {
+                  const cell = column[row] || ''
+                  tableRows += `<td style="padding: 2px 12px; vertical-align: top;">${cell}</td>`
+                }
+                tableRows += '</tr>'
+              }
+
+              return `<table style="border-collapse: collapse;">${tableRows}</table>`
+            }
+          },
+          showDelay: 0,
+          hideDelay: 50,
+          confine: true,
+        },
+        legend: {
+          top: 56,
+          selector: [{ title: 'All' }],
+          selectorPosition: 'start',
+        },
+        grid: {
+          top: 172,
+          right: 72,
+          bottom: 96,
+          left: 72,
+          containLabel: true,
+        },
+        xAxis: {
+          type: 'value',
+          name: 'Cross-shore (m)',
+          nameLocation: 'middle',
+          nameGap: 32,
+          min: xMin,
+          max: xMax,
+          axisLine: { onZero: false },
+        },
+        yAxis: {
+          type: 'value',
+          name: 'Elevation (m)',
+          nameLocation: 'middle',
+          nameGap: 42,
+        },
+        dataZoom: [
+          { type: 'inside', xAxisIndex: 0 },
+          { type: 'slider', xAxisIndex: 0, height: 18, bottom: 24 },
+        ],
+        series,
+        progressive: 2000,
+        progressiveThreshold: 10_000,
+      }
+
+      chart.setOption(option, true)
+    } catch (error) {
+      console.error('ECharts render error:', error)
     }
-
-    const years = basalYears.value || []
-    const basalValues = basalCoastline.value || []
-    const testingValues = testingCoastline.value || []
-    const momentaryValues = momentaryCoastline.value || []
-
-    if (years.length === 0 || basalValues.length === 0) {
-      return
-    }
-
-    // Find first valid index across all series
-    const firstValidIndex = findFirstValidIndex(basalValues, testingValues, momentaryValues)
-
-    // Slice arrays from first valid index
-    const slicedYears = years.slice(firstValidIndex)
-    const slicedBasalValues = basalValues.slice(firstValidIndex)
-    const slicedTestingValues = testingValues.length > 0 ? testingValues.slice(firstValidIndex) : []
-    const slicedMomentaryValues = momentaryValues.length > 0 ? momentaryValues.slice(firstValidIndex) : []
-
-    const option = {
-      animation: true,
-      title: {
-        text: 'Coastline Over Time',
-        left: 'center',
-        top: 0,
-        textStyle: {
-          fontSize: 20,
-          fontWeight: '600',
-        },
-      },
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'line' },
-        formatter: (params) => {
-          const arr = Array.isArray(params) ? params : [params]
-          const valid = arr.filter(p => {
-            const value = p.value
-            return value != null && Number.isFinite(value)
-          })
-          if (valid.length === 0) return ''
-          const year = valid[0].axisValue
-          const header = `<b>Year: ${year}</b>`
-          const lines = valid.map(p => {
-            const value = p.value
-            const marker = p.marker || ''
-            return `${marker}${p.seriesName}: ${value} m`
-          })
-          return [header, ...lines].join('<br/>')
-        },
-        showDelay: 0,
-        hideDelay: 50,
-        confine: true,
-      },
-      legend: {
-        top: 32,
-        selector: [{ title: 'All' }],
-        selectorPosition: 'start',
-      },
-      grid: {
-        top: 80,
-        right: 40,
-        bottom: 60,
-        left: 70,
-        containLabel: true,
-      },
-      xAxis: {
-        type: 'category',
-        name: 'Year',
-        nameLocation: 'middle',
-        nameGap: 30,
-        data: slicedYears,
-        axisLabel: {
-          rotate: 45,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Cross-shore distance (m)',
-        nameLocation: 'middle',
-        nameGap: 50,
-      },
-      series: [
-        {
-          name: 'Basiskustlijn (BKL)',
-          type: 'line',
-          data: slicedBasalValues,
-          showSymbol: true,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          lineStyle: {
-            width: 0, // Hide the line, show only dots
-          },
-          itemStyle: {
-            color: '#9C27B0', // Purple
-          },
-        },
-        {
-          name: 'Toetsing Kustlijn (TKL)',
-          type: 'line',
-          data: slicedTestingValues.length > 0 ? slicedTestingValues : [],
-          showSymbol: true,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          lineStyle: {
-            width: 0, // Hide the line, show only dots
-          },
-          itemStyle: {
-            color: '#4CAF50', // Green
-          },
-        },
-        {
-          name: 'Momentane Kustlijn (MKL)',
-          type: 'line',
-          data: slicedMomentaryValues.length > 0 ? slicedMomentaryValues : [],
-          showSymbol: true,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          lineStyle: {
-            width: 0, // Hide the line, show only dots
-          },
-          itemStyle: {
-            color: '#2196F3', // Blue
-          },
-        },
-      ],
-    }
-
-    basalChart.setOption(option, true)
-  } catch (e) {
-    console.error('Basal chart render error:', e)
   }
-}
 
-function renderMhwChart () {
-  try {
-    if (!mhwChartRef.value) return
-    if (!mhwChart) {
-      mhwChart = echarts.init(mhwChartRef.value, undefined, { renderer: 'canvas' })
-      window.addEventListener('resize', handleMhwResize)
+  // Helper function to find first valid (non-null, non-NaN) index across multiple series
+  function findFirstValidIndex (...seriesArrays) {
+    const maxLength = Math.max(...seriesArrays.map(arr => arr?.length || 0))
+    for (let i = 0; i < maxLength; i++) {
+      for (const series of seriesArrays) {
+        if (series && series[i] != null && Number.isFinite(series[i])) {
+          return i
+        }
+      }
     }
-
-    const years = mhwYears.value || []
-    const mhwValues = meanHighWaterCross.value || []
-    const mlwValues = meanLowWaterCross.value || []
-
-    if (years.length === 0 || mhwValues.length === 0) {
-      return
-    }
-
-    const dfValues = duneFootThreeNAPCross.value || []
-
-    // Find first valid index across all series (including dune foot if available)
-    const firstValidIndex = findFirstValidIndex(mhwValues, mlwValues, dfValues)
-
-    // Slice arrays from first valid index
-    const slicedYears = years.slice(firstValidIndex)
-    const slicedMhwValues = mhwValues.slice(firstValidIndex)
-    const slicedMlwValues = mlwValues.length > 0 ? mlwValues.slice(firstValidIndex) : []
-    const slicedDfValues = dfValues.length > 0 ? dfValues.slice(firstValidIndex) : []
-
-    const option = {
-      animation: true,
-      title: {
-        text: 'Cross shore distance [m]',
-        left: 'center',
-        top: 0,
-        textStyle: {
-          fontSize: 20,
-          fontWeight: '600',
-        },
-      },
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'line' },
-        formatter: (params) => {
-          const arr = Array.isArray(params) ? params : [params]
-          const valid = arr.filter(p => {
-            const value = p.value
-            return value != null && Number.isFinite(value)
-          })
-          if (valid.length === 0) return ''
-          const year = valid[0].axisValue
-          const header = `<b>Year: ${year}</b>`
-          const lines = valid.map(p => {
-            const value = p.value
-            const marker = p.marker || ''
-            return `${marker}${p.seriesName}: ${value} m`
-          })
-          return [header, ...lines].join('<br/>')
-        },
-        showDelay: 0,
-        hideDelay: 50,
-        confine: true,
-      },
-      legend: {
-        top: 32,
-        selector: [{ title: 'All' }],
-        selectorPosition: 'start',
-      },
-      grid: {
-        top: 80,
-        right: 40,
-        bottom: 60,
-        left: 70,
-        containLabel: true,
-      },
-      xAxis: {
-        type: 'category',
-        name: 'Year',
-        nameLocation: 'middle',
-        nameGap: 30,
-        data: slicedYears,
-        axisLabel: {
-          rotate: 45,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Cross-shore distance (m)',
-        nameLocation: 'middle',
-        nameGap: 50,
-      },
-      series: [
-        {
-          name: 'Mean High Water',
-          type: 'line',
-          data: slicedMhwValues,
-          showSymbol: true,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          lineStyle: {
-            width: 0, // Hide the line, show only dots
-          },
-          itemStyle: {
-            color: '#F44336', // Red
-          },
-        },
-        {
-          name: 'Mean Low Water',
-          type: 'line',
-          data: slicedMlwValues.length > 0 ? slicedMlwValues : [],
-          showSymbol: true,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          lineStyle: {
-            width: 0, // Hide the line, show only dots
-          },
-          itemStyle: {
-            color: '#2196F3', // Blue
-          },
-        },
-        {
-          name: 'Dune Foot 3NAP',
-          type: 'line',
-          data: slicedDfValues.length > 0 ? slicedDfValues : [],
-          showSymbol: true,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          lineStyle: {
-            width: 0, // Hide the line, show only dots
-          },
-          itemStyle: {
-            color: '#4CAF50', // Green
-          },
-        },
-      ],
-    }
-
-    mhwChart.setOption(option, true)
-  } catch (e) {
-    console.error('MHW chart render error:', e)
+    return 0 // Default to start if no valid values found
   }
-}
 
-function handleResize () {
-  if (chart) chart.resize()
-  if (basalChart) basalChart.resize()
-  if (mhwChart) mhwChart.resize()
-}
+  function renderBasalChart () {
+    try {
+      if (!basalChartRef.value) return
+      if (!basalChart) {
+        basalChart = echarts.init(basalChartRef.value, undefined, { renderer: 'canvas' })
+      }
 
-function handleBasalResize () {
-  if (basalChart) basalChart.resize()
-}
+      const years = basalYears.value || []
+      const basalValues = basalCoastline.value || []
+      const testingValues = testingCoastline.value || []
+      const momentaryValues = momentaryCoastline.value || []
 
-function handleMhwResize () {
-  if (mhwChart) mhwChart.resize()
-}
+      if (years.length === 0 || basalValues.length === 0) {
+        return
+      }
 
-// Debounced render function for better performance
-const debouncedRender = debounce(() => {
-  if (chartReady.value) {
-    nextTick().then(renderChart)
+      // Find first valid index across all series
+      const firstValidIndex = findFirstValidIndex(basalValues, testingValues, momentaryValues)
+
+      // Slice arrays from first valid index
+      const slicedYears = years.slice(firstValidIndex)
+      const slicedBasalValues = basalValues.slice(firstValidIndex)
+      const slicedTestingValues = testingValues.length > 0 ? testingValues.slice(firstValidIndex) : []
+      const slicedMomentaryValues = momentaryValues.length > 0 ? momentaryValues.slice(firstValidIndex) : []
+
+      const option = {
+        animation: true,
+        title: {
+          text: 'Coastline Over Time',
+          left: 'center',
+          top: 0,
+          textStyle: {
+            fontSize: 20,
+            fontWeight: '600',
+          },
+        },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'line' },
+          formatter: params => {
+            const arr = Array.isArray(params) ? params : [params]
+            const valid = arr.filter(p => {
+              const value = p.value
+              return value != null && Number.isFinite(value)
+            })
+            if (valid.length === 0) return ''
+            const year = valid[0].axisValue
+            const header = `<b>Year: ${year}</b>`
+            const lines = valid.map(p => {
+              const value = p.value
+              const marker = p.marker || ''
+              return `${marker}${p.seriesName}: ${value} m`
+            })
+            return [header, ...lines].join('<br/>')
+          },
+          showDelay: 0,
+          hideDelay: 50,
+          confine: true,
+        },
+        legend: {
+          top: 32,
+          selector: [{ title: 'All' }],
+          selectorPosition: 'start',
+        },
+        grid: {
+          top: 80,
+          right: 40,
+          bottom: 60,
+          left: 70,
+          containLabel: true,
+        },
+        xAxis: {
+          type: 'category',
+          name: 'Year',
+          nameLocation: 'middle',
+          nameGap: 30,
+          data: slicedYears,
+          axisLabel: {
+            rotate: 45,
+          },
+        },
+        yAxis: {
+          type: 'value',
+          name: 'Cross-shore distance (m)',
+          nameLocation: 'middle',
+          nameGap: 50,
+        },
+        series: [
+          {
+            name: 'Basiskustlijn (BKL)',
+            type: 'line',
+            data: slicedBasalValues,
+            showSymbol: true,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            lineStyle: {
+              width: 0, // Hide the line, show only dots
+            },
+            itemStyle: {
+              color: '#9C27B0', // Purple
+            },
+          },
+          {
+            name: 'Toetsing Kustlijn (TKL)',
+            type: 'line',
+            data: slicedTestingValues.length > 0 ? slicedTestingValues : [],
+            showSymbol: true,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            lineStyle: {
+              width: 0, // Hide the line, show only dots
+            },
+            itemStyle: {
+              color: '#4CAF50', // Green
+            },
+          },
+          {
+            name: 'Momentane Kustlijn (MKL)',
+            type: 'line',
+            data: slicedMomentaryValues.length > 0 ? slicedMomentaryValues : [],
+            showSymbol: true,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            lineStyle: {
+              width: 0, // Hide the line, show only dots
+            },
+            itemStyle: {
+              color: '#2196F3', // Blue
+            },
+          },
+        ],
+      }
+
+      basalChart.setOption(option, true)
+    } catch (error) {
+      console.error('Basal chart render error:', error)
+    }
   }
-}, 100) // 100ms debounce
 
-async function fetchBasalNow () {
-  if (indexNotFound.value) return
-  const idx = wantedIndex.value
-  await store.fetchBasalCoastline(idx)
-}
+  function renderMhwChart () {
+    try {
+      if (!mhwChartRef.value) return
+      if (!mhwChart) {
+        mhwChart = echarts.init(mhwChartRef.value, undefined, { renderer: 'canvas' })
+      }
 
-async function fetchMomentaryNow () {
-  if (indexNotFound.value) return
-  const idx = wantedIndex.value
-  await store.fetchMomentaryCoastline(idx)
-}
+      const years = mhwYears.value || []
+      const mhwValues = meanHighWaterCross.value || []
+      const mlwValues = meanLowWaterCross.value || []
 
-async function fetchMhwNow () {
-  if (indexNotFound.value) return
-  const idx = wantedIndex.value
-  await store.fetchMeanHighWaterCross(idx)
-}
+      if (years.length === 0 || mhwValues.length === 0) {
+        return
+      }
 
-async function fetchDfNow () {
-  if (indexNotFound.value) return
-  const idx = wantedIndex.value
-  await store.fetchDuneFootThreeNAPCross(idx)
-}
+      const dfValues = duneFootThreeNAPCross.value || []
 
-onMounted(async () => {
-  // Fetch in parallel instead of sequentially for faster initial load
-  // Time dimension size must be fetched first for dynamic URL construction
-  await Promise.all([
-    store.fetchTransectIdList(),
-    store.fetchAlongshoreList(),
-    store.fetchTimeDimensionSize() // Fetch time dimension size for dynamic URL construction
-  ])
+      // Find first valid index across all series (including dune foot if available)
+      const firstValidIndex = findFirstValidIndex(mhwValues, mlwValues, dfValues)
 
-  // Wait a tick to ensure computed URL is updated with time dimension size
-  await nextTick()
+      // Slice arrays from first valid index
+      const slicedYears = years.slice(firstValidIndex)
+      const slicedMhwValues = mhwValues.slice(firstValidIndex)
+      const slicedMlwValues = mlwValues.length > 0 ? mlwValues.slice(firstValidIndex) : []
+      const slicedDfValues = dfValues.length > 0 ? dfValues.slice(firstValidIndex) : []
 
-  if (!indexNotFound.value) {
+      const option = {
+        animation: true,
+        title: {
+          text: 'Cross shore distance [m]',
+          left: 'center',
+          top: 0,
+          textStyle: {
+            fontSize: 20,
+            fontWeight: '600',
+          },
+        },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'line' },
+          formatter: params => {
+            const arr = Array.isArray(params) ? params : [params]
+            const valid = arr.filter(p => {
+              const value = p.value
+              return value != null && Number.isFinite(value)
+            })
+            if (valid.length === 0) return ''
+            const year = valid[0].axisValue
+            const header = `<b>Year: ${year}</b>`
+            const lines = valid.map(p => {
+              const value = p.value
+              const marker = p.marker || ''
+              return `${marker}${p.seriesName}: ${value} m`
+            })
+            return [header, ...lines].join('<br/>')
+          },
+          showDelay: 0,
+          hideDelay: 50,
+          confine: true,
+        },
+        legend: {
+          top: 32,
+          selector: [{ title: 'All' }],
+          selectorPosition: 'start',
+        },
+        grid: {
+          top: 80,
+          right: 40,
+          bottom: 60,
+          left: 70,
+          containLabel: true,
+        },
+        xAxis: {
+          type: 'category',
+          name: 'Year',
+          nameLocation: 'middle',
+          nameGap: 30,
+          data: slicedYears,
+          axisLabel: {
+            rotate: 45,
+          },
+        },
+        yAxis: {
+          type: 'value',
+          name: 'Cross-shore distance (m)',
+          nameLocation: 'middle',
+          nameGap: 50,
+        },
+        series: [
+          {
+            name: 'Mean High Water',
+            type: 'line',
+            data: slicedMhwValues,
+            showSymbol: true,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            lineStyle: {
+              width: 0, // Hide the line, show only dots
+            },
+            itemStyle: {
+              color: '#F44336', // Red
+            },
+          },
+          {
+            name: 'Mean Low Water',
+            type: 'line',
+            data: slicedMlwValues.length > 0 ? slicedMlwValues : [],
+            showSymbol: true,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            lineStyle: {
+              width: 0, // Hide the line, show only dots
+            },
+            itemStyle: {
+              color: '#2196F3', // Blue
+            },
+          },
+          {
+            name: 'Dune Foot 3NAP',
+            type: 'line',
+            data: slicedDfValues.length > 0 ? slicedDfValues : [],
+            showSymbol: true,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            lineStyle: {
+              width: 0, // Hide the line, show only dots
+            },
+            itemStyle: {
+              color: '#4CAF50', // Green
+            },
+          },
+        ],
+      }
+
+      mhwChart.setOption(option, true)
+    } catch (error) {
+      console.error('MHW chart render error:', error)
+    }
+  }
+
+  function handleResize () {
+    if (chart) chart.resize()
+    if (basalChart) basalChart.resize()
+    if (mhwChart) mhwChart.resize()
+  }
+
+  const debouncedRender = debounce(() => {
+    if (chartReady.value) {
+      nextTick().then(renderChart)
+    }
+  }, 100) // 100ms debounce
+
+  async function fetchBasalNow () {
+    if (indexNotFound.value) return
+    const idx = wantedIndex.value
+    await store.fetchBasalCoastline(idx)
+  }
+
+  async function fetchMomentaryNow () {
+    if (indexNotFound.value) return
+    const idx = wantedIndex.value
+    await store.fetchMomentaryCoastline(idx)
+  }
+
+  async function fetchMhwNow () {
+    if (indexNotFound.value) return
+    const idx = wantedIndex.value
+    await store.fetchMeanHighWaterCross(idx)
+  }
+
+  async function fetchDfNow () {
+    if (indexNotFound.value) return
+    const idx = wantedIndex.value
+    await store.fetchDuneFootThreeNAPCross(idx)
+  }
+
+  onMounted(async () => {
+    window.addEventListener('resize', handleResize)
+
     await Promise.all([
-      fetchNow(),
-      fetchBasalNow(),
-      fetchMomentaryNow(),
-      fetchMhwNow(),
-      fetchDfNow()
+      store.fetchTransectIdList(),
+      store.fetchAlongshoreList(),
+      store.fetchAllDatasetTimeDimensions(),
     ])
-  }
-  await nextTick()
-  renderChart()
-  renderBasalChart()
-  renderMhwChart()
-})
 
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', handleResize)
-  window.removeEventListener('resize', handleBasalResize)
-  window.removeEventListener('resize', handleMhwResize)
-  disposeChart()
-  disposeBasalChart()
-  disposeMhwChart()
-})
+    await nextTick()
 
-// Debounced render for basal chart
-const debouncedRenderBasal = debounce(() => {
-  if (basalReady.value) {
-    nextTick().then(renderBasalChart)
-  }
-}, 100)
+    if (!indexNotFound.value) {
+      await Promise.all([
+        fetchNow(),
+        fetchBasalNow(),
+        fetchMomentaryNow(),
+        fetchMhwNow(),
+        fetchDfNow(),
+      ])
+    }
+    await nextTick()
+    renderChart()
+    renderBasalChart()
+    renderMhwChart()
+  })
 
-// Re-render when data changes (debounced for better performance)
-watch([chartReady, years, crossShore, altitudeByYear], debouncedRender, { 
-  deep: false // Shallow watch is faster
-})
+  onBeforeUnmount(() => {
+    window.removeEventListener('resize', handleResize)
+    disposeChart()
+    disposeBasalChart()
+    disposeMhwChart()
+  })
 
-// Debounced render for MHW chart
-const debouncedRenderMhw = debounce(() => {
-  if (mhwReady.value) {
-    nextTick().then(renderMhwChart)
-  }
-}, 100)
+  // Debounced render for basal chart
+  const debouncedRenderBasal = debounce(() => {
+    if (basalReady.value) {
+      nextTick().then(renderBasalChart)
+    }
+  }, 100)
 
-// Re-render basal chart when data changes
-watch([basalReady, basalYears, basalCoastline, testingCoastline, momentaryReady, momentaryCoastline], debouncedRenderBasal, {
-  deep: false
-})
+  // Re-render when data changes (debounced for better performance)
+  watch([chartReady, years, crossShore, altitudeByYear], debouncedRender, {
+    deep: false, // Shallow watch is faster
+  })
 
-// Re-render MHW chart when data changes
-watch([mhwReady, mhwYears, meanHighWaterCross, meanLowWaterCross, dfReady, duneFootThreeNAPCross], debouncedRenderMhw, {
-  deep: false
-})
+  // Debounced render for MHW chart
+  const debouncedRenderMhw = debounce(() => {
+    if (mhwReady.value) {
+      nextTick().then(renderMhwChart)
+    }
+  }, 100)
 
-// Re-fetch & re-render on route change (different transect) - debounced
-watch(() => route.params.transectNum, debounce(async () => {
-  if (!store.idList?.length) {
-    await store.fetchTransectIdList()
-  }
-  if (!store.alongshoreList?.length) {
-    await store.fetchAlongshoreList()
-  }
-  if (!indexNotFound.value) {
-    await Promise.all([
-      fetchNow(),
-      fetchBasalNow(),
-      fetchMomentaryNow(),
-      fetchMhwNow(),
-      fetchDfNow()
-    ])
-  }
-  await nextTick()
-  renderChart()
-  renderBasalChart()
-  renderMhwChart()
-}, 150))
+  // Re-render basal chart when data changes
+  watch([basalReady, basalYears, basalCoastline, testingCoastline, momentaryReady, momentaryCoastline], debouncedRenderBasal, {
+    deep: false,
+  })
+
+  // Re-render MHW chart when data changes
+  watch([mhwReady, mhwYears, meanHighWaterCross, meanLowWaterCross, dfReady, duneFootThreeNAPCross], debouncedRenderMhw, {
+    deep: false,
+  })
+
+  // Re-fetch & re-render on route change (different transect) - debounced
+  watch(() => route.params.transectNum, debounce(async () => {
+    if (!store.idList?.length) {
+      await store.fetchTransectIdList()
+    }
+    if (!store.alongshoreList?.length) {
+      await store.fetchAlongshoreList()
+    }
+    if (!indexNotFound.value) {
+      await Promise.all([
+        fetchNow(),
+        fetchBasalNow(),
+        fetchMomentaryNow(),
+        fetchMhwNow(),
+        fetchDfNow(),
+      ])
+    }
+    await nextTick()
+    renderChart()
+    renderBasalChart()
+    renderMhwChart()
+  }, 150))
 </script>
 
 <style scoped>
