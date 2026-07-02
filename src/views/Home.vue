@@ -182,7 +182,8 @@
     for (let i = 1; i < xs.length; i++) {
       const d = Math.abs(xs[i])
       if (d < best) {
-        best = d; closest = xs[i]
+        best = d
+        closest = xs[i]
       }
     }
     return closest

@@ -300,10 +300,10 @@ function parseOpendapAscii (ascii) {
   // Expected layout: T rows, each with X values (alongshore=1 collapses away)
   switch (flatAlt.length) {
     case T * X: {
-      altitude2D = new Array(T)
+      altitude2D = Array.from({ length: T })
       let p = 0
       for (let t = 0; t < T; t++) {
-        const row = new Array(X)
+        const row = Array.from({ length: X })
         for (let x = 0; x < X; x++, p++) {
           row[x] = flatAlt[p] ?? null
         }
@@ -313,9 +313,9 @@ function parseOpendapAscii (ascii) {
     }
     case X * T: {
       // Some servers may emit the other order; try transpose
-      altitude2D = new Array(T)
+      altitude2D = Array.from({ length: T })
       for (let t = 0; t < T; t++) {
-        const row = new Array(X)
+        const row = Array.from({ length: X })
         for (let x = 0; x < X; x++) {
           row[x] = flatAlt[x * T + t] ?? null
         }
@@ -325,10 +325,10 @@ function parseOpendapAscii (ascii) {
     }
     case T * 1 * X: {
       // Safety: if alongshore dimension leaked into the flat stream
-      altitude2D = new Array(T)
+      altitude2D = Array.from({ length: T })
       let p = 0
       for (let t = 0; t < T; t++) {
-        const row = new Array(X)
+        const row = Array.from({ length: X })
         for (let a = 0; a < 1; a++) {
           for (let x = 0; x < X; x++, p++) {
             row[x] = flatAlt[p] ?? null
@@ -568,7 +568,7 @@ export const useAppStore = defineStore('app', {
       const payload = capturePayloadBlock(ascii, 'id')
       const clean = stripOpendapIndices(payload)
       const nums = tokenizeNumbers(clean)
-      return nums.map(n => Number.parseInt(String(n), 10)).filter(Number.isFinite)
+      return nums.map(n => Number.parseInt(String(n), 10)).filter(n => Number.isFinite(n))
     },
 
     async fetchAlongshoreList () {
@@ -598,7 +598,7 @@ export const useAppStore = defineStore('app', {
         const payload = capturePayloadBlock(text, 'alongshore')
         const clean = stripOpendapIndices(payload)
         const nums = tokenizeNumbers(clean)
-        const list = nums.map(n => Number.parseInt(String(n), 10)).filter(Number.isFinite)
+        const list = nums.map(n => Number.parseInt(String(n), 10)).filter(n => Number.isFinite(n))
         if (list.length === 0) {
           throw new Error('Could not parse alongshore list')
         }
@@ -644,7 +644,7 @@ export const useAppStore = defineStore('app', {
         const cleanCodes = stripOpendapIndices(codeBlock)
         const codes = tokenizeNumbers(cleanCodes)
           .map(n => Number.parseInt(String(n), 10))
-          .filter(Number.isFinite)
+          .filter(n => Number.isFinite(n))
 
         const names = parseQuotedStringArray(nameBlock)
 
