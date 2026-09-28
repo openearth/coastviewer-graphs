@@ -1,6 +1,6 @@
 # Coastviewer Graphs
 
-A Vue.js web application for visualizing coastal transect data from the JARKUS dataset. The application displays altitude profiles over time for specific transects along the Dutch coast, with interactive charts and detailed metadata.
+A Vue.js web application for visualizing coastal transect data from the JARKUS dataset and related Rijkswaterstaat OpenDAP products. The application displays altitude profiles, coastline indicators, and nourishments over time for specific transects along the Dutch coast, with interactive charts and detailed metadata.
 
 ## Tech Stack
 
@@ -14,6 +14,8 @@ A Vue.js web application for visualizing coastal transect data from the JARKUS d
 ## Features
 
 - Interactive line charts showing altitude profiles across multiple years
+- Coastline and cross-shore indicator time series (BKL/TKL/MKL, MHW/MLW, dune foot)
+- Nourishments bar chart by type (volume per metre), with option to hide empty years
 - Transect selection via URL routing (`/:transectNum`)
 - Side panel displaying transect metadata:
   - Alongshore distance
@@ -22,14 +24,19 @@ A Vue.js web application for visualizing coastal transect data from the JARKUS d
   - Mean low/high water levels
 - LocalStorage caching for faster subsequent loads
 - Automatic transect normalization (snaps to nearest valid transect)
+- Dynamic OpenDAP time ranges (reads dataset DDS so new years are included automatically)
 - Responsive design with data zoom capabilities
 
-## Data Source
+## Data Sources
 
-Data is fetched from Deltares OpenDAP THREDDS server:
-- **Base URL**: `https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/jarkus/profiles/transect.nc.ascii`
-- **Dataset**: JARKUS (JAnkRichting KUSt) coastal monitoring data
-- **Format**: OpenDAP ASCII responses parsed client-side
+Data is fetched from the Deltares OpenDAP THREDDS server (OpenDAP ASCII, parsed client-side):
+
+- **JARKUS profiles**: `…/rijkswaterstaat/jarkus/profiles/transect.nc`
+- **BKL/TKL**: `…/rijkswaterstaat/BKL_TKL_MKL/BKL_TKL_TND.nc`
+- **MKL**: `…/rijkswaterstaat/BKL_TKL_MKL/MKL.nc`
+- **MHW/MLW**: `…/rijkswaterstaat/MHW_MLW/MHW_MLW.nc`
+- **Dune foot**: `…/rijkswaterstaat/DuneFoot/DF.nc`
+- **Nourishments**: `…/rijkswaterstaat/suppleties/nourishments.nc`
 
 ## Project Setup
 

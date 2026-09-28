@@ -6,13 +6,46 @@
       <div ref="chartRef" class="chart" />
       <div ref="basalChartRef" class="chart" />
       <div ref="mhwChartRef" class="chart" />
+      <div class="nourishments-chart-wrap">
+        <div class="nourishments-controls">
+          <button
+            class="nourishments-ctrl-btn"
+            type="button"
+            @click="toggleNourishmentsEmptyYears"
+          >
+            {{ nourishmentsHideEmptyYears ? 'Show years with no data' : 'Hide years without data' }}
+          </button>
+          <button
+            class="nourishments-ctrl-btn"
+            type="button"
+            @click="selectAllNourishmentsSeries"
+          >
+            All
+          </button>
+          <button
+            v-for="s in NOURISHMENT_SERIES"
+            :key="s.key"
+            class="nourishments-legend-item"
+            :class="{ inactive: !nourishmentsLegendSelected[s.label] }"
+            type="button"
+            @click="toggleNourishmentsSeries(s.label)"
+          >
+            <span
+              class="nourishments-legend-swatch"
+              :style="{ backgroundColor: s.color }"
+            />
+            {{ s.label }}
+          </button>
+        </div>
+        <div ref="nourishmentsChartRef" class="chart" />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
   import * as echarts from 'echarts'
-  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+  import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
   import { useRoute } from 'vue-router'
   import SidePanel from '@/components/SidePanel.vue'
   import { useAppStore } from '@/stores/app'
@@ -60,6 +93,51 @@
   // Dune foot threeNAP cross data
   const dfReady = computed(() => store.dfReady)
   const duneFootThreeNAPCross = computed(() => store.duneFootThreeNAPCross)
+
+  // Nourishments (volume per type)
+  const nourishmentsReady = computed(() => store.nourishmentsReady)
+  const nourishmentsYears = computed(() => store.nourishmentsYears)
+  const nourishmentsByType = computed(() => store.nourishmentsByType)
+
+  const NOURISHMENT_SERIES = [
+    { key: 'beach', label: 'Strand', color: '#e4e472' },
+    { key: 'shoreface', label: 'Vooroever', color: '#72a8e4' },
+    { key: 'dune', label: 'Duin', color: '#e4a872' },
+    { key: 'channel_wall', label: 'Geulwand', color: '#ababab' },
+    { key: 'other', label: 'Anders', color: '#e472e4' },
+  ]
+
+  const nourishmentsHideEmptyYears = ref(false)
+  const nourishmentsLegendSelected = reactive(
+    Object.fromEntries(NOURISHMENT_SERIES.map(s => [s.label, true])),
+  )
+
+  function toggleNourishmentsEmptyYears () {
+    nourishmentsHideEmptyYears.value = !nourishmentsHideEmptyYears.value
+    nextTick().then(renderNourishmentsChart)
+  }
+
+  function applyNourishmentsLegendSelection () {
+    if (!nourishmentsChart) return
+    for (const s of NOURISHMENT_SERIES) {
+      nourishmentsChart.dispatchAction({
+        type: nourishmentsLegendSelected[s.label] ? 'legendSelect' : 'legendUnSelect',
+        name: s.label,
+      })
+    }
+  }
+
+  function selectAllNourishmentsSeries () {
+    for (const s of NOURISHMENT_SERIES) {
+      nourishmentsLegendSelected[s.label] = true
+    }
+    applyNourishmentsLegendSelection()
+  }
+
+  function toggleNourishmentsSeries (label) {
+    nourishmentsLegendSelected[label] = !nourishmentsLegendSelected[label]
+    applyNourishmentsLegendSelection()
+  }
 
   // Current transect number from route (fallback to default)
   const currentTransectNum = computed(() => {
@@ -124,6 +202,9 @@
   const mhwChartRef = ref(null)
   let mhwChart = null
 
+  const nourishmentsChartRef = ref(null)
+  let nourishmentsChart = null
+
   function disposeChart () {
     if (chart) {
       chart.dispose()
@@ -142,6 +223,13 @@
     if (mhwChart) {
       mhwChart.dispose()
       mhwChart = null
+    }
+  }
+
+  function disposeNourishmentsChart () {
+    if (nourishmentsChart) {
+      nourishmentsChart.dispose()
+      nourishmentsChart = null
     }
   }
 
@@ -661,10 +749,140 @@
     }
   }
 
+  function renderNourishmentsChart () {
+    try {
+      if (!nourishmentsChartRef.value) return
+      if (!nourishmentsChart) {
+        nourishmentsChart = echarts.init(nourishmentsChartRef.value, undefined, { renderer: 'canvas' })
+      }
+
+      const years = nourishmentsYears.value || []
+      const byType = nourishmentsByType.value || {}
+
+      if (years.length === 0) {
+        return
+      }
+
+      const seriesArrays = NOURISHMENT_SERIES.map(s => byType[s.key] || [])
+      const hasAnyData = seriesArrays.some(arr =>
+        arr.some(v => v != null && Number.isFinite(v)),
+      )
+
+      if (!hasAnyData) {
+        nourishmentsChart.clear()
+        nourishmentsChart.setOption({
+          title: {
+            text: 'Nourishments',
+            left: 'center',
+            top: 0,
+            textStyle: { fontSize: 20, fontWeight: '600' },
+          },
+          graphic: {
+            type: 'text',
+            left: 'center',
+            top: 'middle',
+            style: {
+              text: 'No nourishments for this transect',
+              fill: '#888',
+              fontSize: 14,
+            },
+          },
+        }, true)
+        return
+      }
+
+      let yearIndexes = years.map((_, i) => i)
+      if (nourishmentsHideEmptyYears.value) {
+        yearIndexes = yearIndexes.filter(i =>
+          seriesArrays.some(arr => arr[i] != null && Number.isFinite(arr[i])),
+        )
+      }
+
+      const axisYears = yearIndexes.map(i => years[i])
+      const series = NOURISHMENT_SERIES.map((s, seriesIdx) => ({
+        name: s.label,
+        type: 'bar',
+        data: yearIndexes.map(i => {
+          const v = seriesArrays[seriesIdx][i]
+          return v == null ? null : Math.round(v * 10) / 10
+        }),
+        itemStyle: { color: s.color },
+        barMaxWidth: 18,
+      }))
+
+      const option = {
+        animation: true,
+        title: {
+          text: 'Nourishments',
+          left: 'center',
+          top: 0,
+          textStyle: {
+            fontSize: 20,
+            fontWeight: '600',
+          },
+        },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          formatter: params => {
+            const arr = Array.isArray(params) ? params : [params]
+            const valid = arr.filter(p => p.value != null && Number.isFinite(p.value))
+            if (valid.length === 0) return ''
+            const year = valid[0].axisValue
+            const header = `<b>Year: ${year}</b>`
+            const lines = valid.map(p => {
+              const marker = p.marker || ''
+              return `${marker}${p.seriesName}: ${p.value} m³/m`
+            })
+            return [header, ...lines].join('<br/>')
+          },
+          showDelay: 0,
+          hideDelay: 50,
+          confine: true,
+        },
+        legend: { show: false },
+        grid: {
+          top: 80,
+          right: 40,
+          bottom: 80,
+          left: 70,
+          containLabel: true,
+        },
+        xAxis: {
+          type: 'category',
+          name: 'Year',
+          nameLocation: 'middle',
+          nameGap: 30,
+          data: axisYears,
+          axisLabel: {
+            rotate: 45,
+          },
+        },
+        yAxis: {
+          type: 'value',
+          name: 'Nourishments [m³/m]',
+          nameLocation: 'middle',
+          nameGap: 50,
+        },
+        dataZoom: [
+          { type: 'inside', xAxisIndex: 0 },
+          { type: 'slider', xAxisIndex: 0, height: 18, bottom: 16 },
+        ],
+        series,
+      }
+
+      nourishmentsChart.setOption(option, true)
+      applyNourishmentsLegendSelection()
+    } catch (error) {
+      console.error('Nourishments chart render error:', error)
+    }
+  }
+
   function handleResize () {
     if (chart) chart.resize()
     if (basalChart) basalChart.resize()
     if (mhwChart) mhwChart.resize()
+    if (nourishmentsChart) nourishmentsChart.resize()
   }
 
   const debouncedRender = debounce(() => {
@@ -697,6 +915,12 @@
     await store.fetchDuneFootThreeNAPCross(idx)
   }
 
+  async function fetchNourishmentsNow () {
+    if (indexNotFound.value) return
+    const idx = wantedIndex.value
+    await store.fetchNourishments(idx)
+  }
+
   onMounted(async () => {
     window.addEventListener('resize', handleResize)
 
@@ -715,12 +939,14 @@
         fetchMomentaryNow(),
         fetchMhwNow(),
         fetchDfNow(),
+        fetchNourishmentsNow(),
       ])
     }
     await nextTick()
     renderChart()
     renderBasalChart()
     renderMhwChart()
+    renderNourishmentsChart()
   })
 
   onBeforeUnmount(() => {
@@ -728,6 +954,7 @@
     disposeChart()
     disposeBasalChart()
     disposeMhwChart()
+    disposeNourishmentsChart()
   })
 
   // Debounced render for basal chart
@@ -759,6 +986,16 @@
     deep: false,
   })
 
+  const debouncedRenderNourishments = debounce(() => {
+    if (nourishmentsReady.value) {
+      nextTick().then(renderNourishmentsChart)
+    }
+  }, 100)
+
+  watch([nourishmentsReady, nourishmentsYears, nourishmentsByType], debouncedRenderNourishments, {
+    deep: true,
+  })
+
   // Re-fetch & re-render on route change (different transect) - debounced
   watch(() => route.params.transectNum, debounce(async () => {
     if (!store.idList?.length) {
@@ -774,12 +1011,14 @@
         fetchMomentaryNow(),
         fetchMhwNow(),
         fetchDfNow(),
+        fetchNourishmentsNow(),
       ])
     }
     await nextTick()
     renderChart()
     renderBasalChart()
     renderMhwChart()
+    renderNourishmentsChart()
   }, 150))
 </script>
 
@@ -788,7 +1027,7 @@
   display: flex;
   width: 100%;
   height: 100%;
-  min-height: 1800px;
+  min-height: 2400px;
 }
 
 .chart-wrap {
@@ -805,5 +1044,81 @@
 .chart {
   width: 100%;
   height: 600px;
+}
+
+.nourishments-chart-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.nourishments-controls {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 12px;
+  pointer-events: none;
+}
+
+.nourishments-controls > * {
+  pointer-events: auto;
+}
+
+.nourishments-ctrl-btn {
+  margin: 0;
+  padding: 0 8px;
+  height: 22px;
+  border: 1px solid rgb(204, 204, 204);
+  border-radius: 10px;
+  background: #fff;
+  color: rgb(102, 102, 102);
+  font-size: 12px;
+  font-family: sans-serif;
+  line-height: 20px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nourishments-ctrl-btn:hover {
+  color: rgb(51, 51, 51);
+  border-color: rgb(153, 153, 153);
+}
+
+.nourishments-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgb(51, 51, 51);
+  font-size: 12px;
+  font-family: sans-serif;
+  line-height: 20px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nourishments-legend-item.inactive {
+  color: rgb(170, 170, 170);
+}
+
+.nourishments-legend-item.inactive .nourishments-legend-swatch {
+  opacity: 0.35;
+}
+
+.nourishments-legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  flex-shrink: 0;
 }
 </style>

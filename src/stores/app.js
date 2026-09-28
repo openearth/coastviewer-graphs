@@ -15,6 +15,9 @@ const BKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswat
 const MKL_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/BKL_TKL_MKL/MKL.nc.ascii'
 const MHW_MLW_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/MHW_MLW/MHW_MLW.nc.ascii'
 const DF_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/DuneFoot/DF.nc.ascii'
+const NOURISHMENTS_BASE_URL = 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/suppleties/nourishments.nc.ascii'
+
+const NOURISHMENT_TYPE_KEYS = ['beach', 'shoreface', 'dune', 'channel_wall', 'other']
 
 const ID_LIST_CACHE_KEY = 'jarkus_id_list_v1'
 const ALONG_CACHE_KEY = 'jarkus_along_list_v1'
@@ -49,6 +52,11 @@ const DATASET_TIME_CONFIG = {
     ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/DuneFoot/DF.nc',
     cacheKey: 'jarkus_df_time_dimension_v1',
     fallbackSize: 183,
+  },
+  nourishments: {
+    ncBaseUrl: 'https://opendap.deltares.nl/thredds/dodsC/opendap/rijkswaterstaat/suppleties/nourishments.nc',
+    cacheKey: 'jarkus_nourishments_time_dimension_v1',
+    fallbackSize: 74,
   },
 }
 
@@ -166,6 +174,20 @@ function refreshAsciiCacheInBackground (url, cacheKey) {
 
 function nullifySentinel (values) {
   return values.map(v => (v === -9999 ? null : v))
+}
+
+/** Nourishments volume uses 0.0 as _FillValue — treat as missing for charting. */
+function nullifyZeroFill (values) {
+  return values.map(v => {
+    if (v == null || Number.isNaN(v) || v === -9999 || v === 0) {
+      return null
+    }
+    return v
+  })
+}
+
+function emptyNourishmentsByType () {
+  return Object.fromEntries(NOURISHMENT_TYPE_KEYS.map(key => [key, []]))
 }
 
 function toYearLabels (timeVals) {
@@ -447,6 +469,42 @@ function parseDuneFootThreeNAPCrossAscii (ascii) {
   }
 }
 
+function parseNourishmentsAscii (ascii) {
+  const timeBlock = capturePayloadBlock(ascii, 'time')
+  const volumeBlock = capturePayloadBlock(ascii, 'volume')
+
+  const timeValues = tokenizeNumbers(timeBlock)
+  const flatVolume = nullifyZeroFill(tokenizeNumbers(stripOpendapIndices(volumeBlock)))
+
+  if (timeValues.length === 0 || flatVolume.length === 0) {
+    const head = (ascii || '').slice(0, 500)
+    throw new Error(
+      'Could not parse time/volume arrays from nourishments payload. '
+      + 'Response (first 500 chars):\n' + head,
+    )
+  }
+
+  const years = toYearLabels(timeValues)
+  const T = years.length
+  const N = NOURISHMENT_TYPE_KEYS.length
+  const expected = T * N
+
+  if (flatVolume.length !== expected) {
+    throw new Error(
+      `Nourishments volume size mismatch: got ${flatVolume.length}, expected ${T}×${N}=${expected}.`,
+    )
+  }
+
+  const byType = emptyNourishmentsByType()
+  for (let t = 0; t < T; t++) {
+    for (let n = 0; n < N; n++) {
+      byType[NOURISHMENT_TYPE_KEYS[n]].push(flatVolume[t * N + n])
+    }
+  }
+
+  return { years, byType }
+}
+
 export const useAppStore = defineStore('app', {
   state: () => ({
     loading: false,
@@ -514,6 +572,13 @@ export const useAppStore = defineStore('app', {
     dfReady: false,
     dfFetchedAt: null,
 
+    loadingNourishments: false,
+    nourishmentsError: null,
+    nourishmentsYears: [],
+    nourishmentsByType: emptyNourishmentsByType(),
+    nourishmentsReady: false,
+    nourishmentsFetchedAt: null,
+
     timeDimensionSizes: {},
 
     _aborter: null,
@@ -521,6 +586,7 @@ export const useAppStore = defineStore('app', {
     _momentaryAborter: null,
     _mhwAborter: null,
     _dfAborter: null,
+    _nourishmentsAborter: null,
   }),
 
   actions: {
@@ -1143,6 +1209,85 @@ export const useAppStore = defineStore('app', {
       } finally {
         this.loadingDf = false
       }
+    },
+
+    async fetchNourishments (transectIndex) {
+      if (transectIndex < 0 || transectIndex >= 2465) {
+        this.nourishmentsError = 'Invalid transect index'
+        return
+      }
+
+      const timeMax = await this._timeMaxIndex('nourishments')
+      const typeMax = NOURISHMENT_TYPE_KEYS.length - 1
+      const url = `${NOURISHMENTS_BASE_URL}?time[0:1:${timeMax}],volume[${transectIndex}][0:1:${timeMax}][0:1:${typeMax}]`
+
+      const cacheKey = `nourishments_cache::${url}`
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          const obj = JSON.parse(cached)
+          const text = obj.data || ''
+          if (text) {
+            this._applyNourishments(parseNourishmentsAscii(text), obj.t || null)
+            this.nourishmentsError = null
+            this.loadingNourishments = false
+            refreshAsciiCacheInBackground(url, cacheKey)
+            return
+          }
+        } catch (error) {
+          console.warn('Nourishments cache parse error, fetching fresh:', error)
+        }
+      }
+
+      if (this._nourishmentsAborter) {
+        try {
+          this._nourishmentsAborter.abort()
+        } catch {
+          // Silent abort error
+        }
+      }
+      this._nourishmentsAborter = new AbortController()
+
+      this.loadingNourishments = true
+      this.nourishmentsError = null
+      this.nourishmentsReady = false
+      this.nourishmentsYears = []
+      this.nourishmentsByType = emptyNourishmentsByType()
+
+      try {
+        const res = await fetch(url, { cache: 'no-store', signal: this._nourishmentsAborter.signal })
+        if (!res.ok) {
+          throw new Error(`Failed to fetch nourishments data (${res.status})`)
+        }
+        const text = await res.text()
+        this._applyNourishments(parseNourishmentsAscii(text), Date.now())
+
+        if (text.length <= MAX_LOCALSTORAGE_CACHE_SIZE) {
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify({
+              t: this.nourishmentsFetchedAt,
+              data: text,
+            }))
+          } catch {
+            // Cache too large or storage full
+          }
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          // Silent abort
+        } else {
+          this.nourishmentsError = error?.message || String(error)
+        }
+      } finally {
+        this.loadingNourishments = false
+      }
+    },
+
+    _applyNourishments (parsed, fetchedAt) {
+      this.nourishmentsYears = parsed.years
+      this.nourishmentsByType = parsed.byType
+      this.nourishmentsReady = true
+      this.nourishmentsFetchedAt = fetchedAt
     },
 
     _applyAltitudeChart (parsed) {
